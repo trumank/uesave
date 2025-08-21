@@ -56,29 +56,136 @@ trait Writable<W, V> {
 }
 
 struct SeekReader<R: Read> {
-    reader: R,
-    read_bytes: usize,
+    inner: R,
+    buffer: Vec<u8>,
+    position: usize,
+    reached_eof: bool,
 }
 
 impl<R: Read> SeekReader<R> {
-    fn new(reader: R) -> Self {
+    fn new(inner: R) -> Self {
         Self {
-            reader,
-            read_bytes: 0,
+            inner,
+            buffer: vec![],
+            position: 0,
+            reached_eof: false,
         }
+    }
+    fn position(&self) -> usize {
+        self.position
+    }
+    fn ensure_buffered(&mut self, min_bytes: usize) -> std::io::Result<()> {
+        if self.reached_eof {
+            return Ok(());
+        }
+
+        let available = self.buffer.len().saturating_sub(self.position);
+        if available >= min_bytes {
+            return Ok(());
+        }
+
+        let needed = min_bytes - available;
+
+        // Reserve space for the additional bytes we need to read
+        self.buffer.reserve(needed);
+
+        // Read more data from the underlying reader
+        let mut temp_buf = vec![0; needed];
+        let mut total_read = 0;
+
+        while total_read < needed && !self.reached_eof {
+            let bytes_read = self.inner.read(&mut temp_buf[total_read..])?;
+            if bytes_read == 0 {
+                self.reached_eof = true;
+                break;
+            }
+            total_read += bytes_read;
+        }
+
+        // Append the read data to our buffer
+        self.buffer.extend_from_slice(&temp_buf[..total_read]);
+
+        Ok(())
     }
 }
 impl<R: Read> Seek for SeekReader<R> {
+    // fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+    //     match pos {
+    //         std::io::SeekFrom::Current(0) => Ok(self.read_bytes as u64),
+    //         _ => unimplemented!(),
+    //     }
+    // }
     fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
-        match pos {
-            std::io::SeekFrom::Current(0) => Ok(self.read_bytes as u64),
-            _ => unimplemented!(),
+        let new_position = match pos {
+            std::io::SeekFrom::Start(offset) => offset as i64,
+            std::io::SeekFrom::Current(offset) => self.position as i64 + offset,
+            std::io::SeekFrom::End(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "Seeking from end is not supported for non-seekable readers",
+                ));
+            }
+        };
+
+        if new_position < 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Cannot seek to a negative position",
+            ));
         }
+
+        let new_position = new_position as usize;
+
+        // If seeking within already buffered data, just update position
+        if new_position <= self.buffer.len() {
+            self.position = new_position;
+            return Ok(new_position as u64);
+        }
+
+        // If seeking beyond buffered data, we need to read more
+        let bytes_needed = new_position - self.buffer.len();
+        self.position = self.buffer.len();
+
+        // Read and buffer bytes until we reach the target position
+        let mut temp_buf = vec![0; bytes_needed.min(8192)];
+        let mut remaining = bytes_needed;
+
+        while remaining > 0 {
+            let to_read = remaining.min(temp_buf.len());
+            let bytes_read = self.read(&mut temp_buf[..to_read])?;
+            if bytes_read == 0 {
+                // Hit EOF before reaching target position
+                return Ok(self.position as u64);
+            }
+            remaining -= bytes_read;
+        }
+
+        Ok(new_position as u64)
     }
 }
 impl<R: Read> Read for SeekReader<R> {
+    // fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+    //     self.reader.read(buf).inspect(|s| self.read_bytes += s)
+    // }
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        self.reader.read(buf).inspect(|s| self.read_bytes += s)
+        if buf.is_empty() {
+            return Ok(0);
+        }
+
+        // Ensure we have data available
+        self.ensure_buffered(1)?;
+
+        // Copy data from our buffer to the output buffer
+        let available = self.buffer.len() - self.position;
+        if available == 0 {
+            return Ok(0); // EOF
+        }
+
+        let to_copy = buf.len().min(available);
+        buf[..to_copy].copy_from_slice(&self.buffer[self.position..self.position + to_copy]);
+        self.position += to_copy;
+
+        Ok(to_copy)
     }
 }
 
@@ -2954,6 +3061,7 @@ pub enum PropertyInner {
     Map(Vec<MapEntry>),
     Struct(StructValue),
     Array(ValueArray),
+    /// Raw property data when parsing fails
     Raw(Vec<u8>),
 }
 
@@ -2971,7 +3079,35 @@ impl Property {
                 inner: PropertyInner::Raw(raw),
             });
         }
-        let inner = match &tag.data {
+        // Save the current position before attempting to parse
+        let start_position = reader.stream_position()?;
+
+        // Try to parse the property directly from the stream
+        let inner = match Self::try_read_inner(reader, &tag) {
+            Ok(inner) => inner,
+            Err(e) => {
+                // Parsing failed, seek back to start and read raw data
+                if reader.log() {
+                    eprintln!("Warning: Failed to parse property '{}': {}", tag.name, e);
+                }
+                reader.seek(std::io::SeekFrom::Start(start_position))?;
+                let mut property_data = vec![0u8; tag.size as usize];
+                reader.read_exact(&mut property_data)?;
+                PropertyInner::Raw(property_data)
+            }
+        };
+
+        Ok(Property {
+            tag: tag.into_partial(),
+            inner,
+        })
+    }
+
+    fn try_read_inner<R: Read + Seek, V: VersionInfo>(
+        reader: &mut Context<R, V>,
+        tag: &PropertyTagFull,
+    ) -> TResult<PropertyInner> {
+        Ok(match &tag.data {
             PropertyTagDataFull::Bool(value) => PropertyInner::Bool(*value),
             PropertyTagDataFull::Byte(ref enum_type) => {
                 let value = if enum_type.is_none() {
@@ -3049,10 +3185,6 @@ impl Property {
                     PropertyInner::MulticastSparseDelegate(MulticastSparseDelegate::read(reader)?)
                 }
             },
-        };
-        Ok(Property {
-            tag: tag.into_partial(),
-            inner,
         })
     }
     fn write<W: Write, V: VersionInfo>(
