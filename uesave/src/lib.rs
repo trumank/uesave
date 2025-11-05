@@ -27,6 +27,7 @@ match save.root.properties["NumberOfGamesPlayed"] {
 ```
 */
 
+mod archive;
 mod error;
 
 #[cfg(test)]
@@ -37,12 +38,15 @@ pub use error::{Error, ParseError};
 use byteorder::{ReadBytesExt, WriteBytesExt, LE};
 use std::{
     borrow::Cow,
-    io::{Read, Seek, Write},
+    io::{Cursor, Read, Seek, Write},
+    rc::Rc,
 };
 
 use serde::{de::Visitor, Deserialize, Deserializer, Serialize, Serializer};
 
 use tracing::instrument;
+
+use crate::archive::{ArchiveReader, ArchiveWriter};
 
 type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -188,7 +192,7 @@ fn read_optional_uuid<R: Read + Seek>(reader: &mut Context<R>) -> Result<Option<
         None
     })
 }
-fn write_optional_uuid<W: Write>(writer: &mut Context<W>, id: Option<FGuid>) -> Result<()> {
+fn write_optional_uuid<W: Write + Seek>(writer: &mut Context<W>, id: Option<FGuid>) -> Result<()> {
     if let Some(id) = id {
         writer.write_u8(1)?;
         id.write(writer)?;
@@ -213,7 +217,7 @@ fn read_string<R: Read + Seek>(reader: &mut Context<R>) -> Result<String> {
     }
 }
 #[instrument(skip(writer))]
-fn write_string<W: Write>(writer: &mut Context<W>, string: &str) -> Result<()> {
+fn write_string<W: Write + Seek>(writer: &mut Context<W>, string: &str) -> Result<()> {
     if string.is_empty() {
         writer.write_u32::<LE>(0)?;
     } else {
@@ -268,7 +272,7 @@ fn read_string_trailing<R: Read + Seek>(reader: &mut Context<R>) -> Result<(Stri
     }
 }
 #[instrument(skip_all)]
-fn write_string_trailing<W: Write>(
+fn write_string_trailing<W: Write + Seek>(
     writer: &mut Context<W>,
     string: &str,
     trailing: Option<&[u8]>,
@@ -381,7 +385,7 @@ fn read_properties_until_none<R: Read + Seek>(reader: &mut Context<R>) -> Result
     Ok(properties)
 }
 #[instrument(skip_all)]
-fn write_properties_none_terminated<W: Write>(
+fn write_properties_none_terminated<W: Write + Seek>(
     writer: &mut Context<W>,
     properties: &Properties,
 ) -> Result<()> {
@@ -404,7 +408,7 @@ fn read_property<R: Read + Seek>(
     }
 }
 #[instrument(skip_all)]
-fn write_property<W: Write>(
+fn write_property<W: Write + Seek>(
     prop: (&PropertyKey, &Property),
     writer: &mut Context<W>,
 ) -> Result<()> {
@@ -414,7 +418,9 @@ fn write_property<W: Write>(
         .clone()
         .into_full(&prop.0 .1, 0, prop.0 .0, prop.1);
     let mut buf = vec![];
-    let size = writer.with_stream(&mut buf, |writer| prop.1.write(writer, &tag))? as u32;
+    let size = writer.with_stream(&mut Cursor::new(&mut buf), |writer| {
+        prop.1.write(writer, &tag)
+    })? as u32;
     tag.size = size;
 
     tag.write(writer)?;
@@ -521,22 +527,22 @@ impl<'de> Deserialize<'de> for FGuid {
 
 impl FGuid {
     #[instrument(name = "FGuid_read", skip_all)]
-    fn read<R: Read + Seek>(reader: &mut Context<R>) -> Result<FGuid> {
+    fn read<A: ArchiveReader>(ar: &mut A) -> Result<FGuid> {
         Ok(Self {
-            a: reader.read_u32::<LE>()?,
-            b: reader.read_u32::<LE>()?,
-            c: reader.read_u32::<LE>()?,
-            d: reader.read_u32::<LE>()?,
+            a: ar.read_u32::<LE>()?,
+            b: ar.read_u32::<LE>()?,
+            c: ar.read_u32::<LE>()?,
+            d: ar.read_u32::<LE>()?,
         })
     }
 }
 impl FGuid {
     #[instrument(name = "FGuid_write", skip_all)]
-    fn write<W: Write>(&self, writer: &mut Context<W>) -> Result<()> {
-        writer.write_u32::<LE>(self.a)?;
-        writer.write_u32::<LE>(self.b)?;
-        writer.write_u32::<LE>(self.c)?;
-        writer.write_u32::<LE>(self.d)?;
+    fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
+        ar.write_u32::<LE>(self.a)?;
+        ar.write_u32::<LE>(self.b)?;
+        ar.write_u32::<LE>(self.c)?;
+        ar.write_u32::<LE>(self.d)?;
         Ok(())
     }
 }
@@ -606,7 +612,7 @@ impl<S: Seek> Seek for Context<S> {
         self.stream.seek(pos)
     }
 }
-impl<W: Write> Write for Context<W> {
+impl<W: Write + Seek> Write for Context<W> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         self.stream.write(buf)
     }
@@ -1080,11 +1086,11 @@ impl PropertyTagFull<'_> {
             })
         }
     }
-    fn write<W: Write>(&self, writer: &mut Context<W>) -> Result<()> {
+    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
         write_string(writer, &self.name)?;
 
         if writer.version().property_tag() {
-            fn write_node<W: Write>(
+            fn write_node<W: Write + Seek>(
                 writer: &mut Context<W>,
                 name: &str,
                 inner_count: u32,
@@ -1093,13 +1099,16 @@ impl PropertyTagFull<'_> {
                 writer.write_u32::<LE>(inner_count)?;
                 Ok(())
             }
-            fn write_full_type<W: Write>(writer: &mut Context<W>, full_type: &str) -> Result<()> {
+            fn write_full_type<W: Write + Seek>(
+                writer: &mut Context<W>,
+                full_type: &str,
+            ) -> Result<()> {
                 let (a, b) = full_type.split_once('.').unwrap(); // TODO
                 write_node(writer, b, 1)?;
                 write_node(writer, a, 0)?;
                 Ok(())
             }
-            fn write_nodes<W: Write>(
+            fn write_nodes<W: Write + Seek>(
                 writer: &mut Context<W>,
                 flags: &mut EPropertyTagFlags,
                 data: &PropertyTagDataFull,
@@ -1311,7 +1320,7 @@ impl PropertyType {
             _ => Err(Error::UnknownPropertyType(format!("{name:?}"))),
         }
     }
-    fn write<W: Write>(&self, writer: &mut Context<W>) -> Result<()> {
+    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
         write_string(writer, self.get_name())?;
         Ok(())
     }
@@ -1454,7 +1463,7 @@ impl StructType {
     fn read<R: Read + Seek>(reader: &mut Context<R>) -> Result<Self> {
         Ok(read_string(reader)?.into())
     }
-    fn write<W: Write>(&self, writer: &mut Context<W>) -> Result<()> {
+    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
         write_string(writer, self.as_str())?;
         Ok(())
     }
@@ -1720,7 +1729,7 @@ impl MapEntry {
         let value = PropertyValue::read(reader, value_type)?;
         Ok(Self { key, value })
     }
-    fn write<W: Write>(&self, writer: &mut Context<W>) -> Result<()> {
+    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
         self.key.write(writer)?;
         self.value.write(writer)?;
         Ok(())
@@ -1740,7 +1749,7 @@ impl FieldPath {
             owner: read_string(reader)?,
         })
     }
-    fn write<W: Write>(&self, writer: &mut Context<W>) -> Result<()> {
+    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
         writer.write_u32::<LE>(self.path.len() as u32)?;
         for p in &self.path {
             write_string(writer, p)?;
@@ -1763,7 +1772,7 @@ impl Delegate {
             path: read_string(reader)?,
         })
     }
-    fn write<W: Write>(&self, writer: &mut Context<W>) -> Result<()> {
+    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
         write_string(writer, &self.name)?;
         write_string(writer, &self.path)?;
         Ok(())
@@ -1781,7 +1790,7 @@ impl MulticastDelegate {
             Delegate::read,
         )?))
     }
-    fn write<W: Write>(&self, writer: &mut Context<W>) -> Result<()> {
+    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
         writer.write_u32::<LE>(self.0.len() as u32)?;
         for entry in &self.0 {
             entry.write(writer)?;
@@ -1801,7 +1810,7 @@ impl MulticastInlineDelegate {
             Delegate::read,
         )?))
     }
-    fn write<W: Write>(&self, writer: &mut Context<W>) -> Result<()> {
+    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
         writer.write_u32::<LE>(self.0.len() as u32)?;
         for entry in &self.0 {
             entry.write(writer)?;
@@ -1821,7 +1830,7 @@ impl MulticastSparseDelegate {
             Delegate::read,
         )?))
     }
-    fn write<W: Write>(&self, writer: &mut Context<W>) -> Result<()> {
+    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
         writer.write_u32::<LE>(self.0.len() as u32)?;
         for entry in &self.0 {
             entry.write(writer)?;
@@ -1847,7 +1856,7 @@ impl LinearColor {
             a: reader.read_f32::<LE>()?.into(),
         })
     }
-    fn write<W: Write>(&self, writer: &mut Context<W>) -> Result<()> {
+    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
         writer.write_f32::<LE>(self.r.into())?;
         writer.write_f32::<LE>(self.g.into())?;
         writer.write_f32::<LE>(self.b.into())?;
@@ -1881,7 +1890,7 @@ impl Quat {
             })
         }
     }
-    fn write<W: Write>(&self, writer: &mut Context<W>) -> Result<()> {
+    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
         if writer.version().large_world_coordinates() {
             writer.write_f64::<LE>(self.x.into())?;
             writer.write_f64::<LE>(self.y.into())?;
@@ -1919,7 +1928,7 @@ impl Rotator {
             })
         }
     }
-    fn write<W: Write>(&self, writer: &mut Context<W>) -> Result<()> {
+    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
         if writer.version().large_world_coordinates() {
             writer.write_f64::<LE>(self.x.into())?;
             writer.write_f64::<LE>(self.y.into())?;
@@ -1949,7 +1958,7 @@ impl Color {
             a: reader.read_u8()?,
         })
     }
-    fn write<W: Write>(&self, writer: &mut Context<W>) -> Result<()> {
+    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
         writer.write_u8(self.r)?;
         writer.write_u8(self.g)?;
         writer.write_u8(self.b)?;
@@ -1980,7 +1989,7 @@ impl Vector {
             })
         }
     }
-    fn write<W: Write>(&self, writer: &mut Context<W>) -> Result<()> {
+    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
         if writer.version().large_world_coordinates() {
             writer.write_f64::<LE>(self.x.into())?;
             writer.write_f64::<LE>(self.y.into())?;
@@ -2013,7 +2022,7 @@ impl Vector2D {
             })
         }
     }
-    fn write<W: Write>(&self, writer: &mut Context<W>) -> Result<()> {
+    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
         if writer.version().large_world_coordinates() {
             writer.write_f64::<LE>(self.x.into())?;
             writer.write_f64::<LE>(self.y.into())?;
@@ -2039,7 +2048,7 @@ impl IntVector {
             z: reader.read_i32::<LE>()?,
         })
     }
-    fn write<W: Write>(&self, writer: &mut Context<W>) -> Result<()> {
+    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
         writer.write_i32::<LE>(self.x)?;
         writer.write_i32::<LE>(self.y)?;
         writer.write_i32::<LE>(self.z)?;
@@ -2061,7 +2070,7 @@ impl Box {
             is_valid: reader.read_u8()? > 0,
         })
     }
-    fn write<W: Write>(&self, writer: &mut Context<W>) -> Result<()> {
+    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
         self.min.write(writer)?;
         self.max.write(writer)?;
         writer.write_u8(self.is_valid as u8)?;
@@ -2081,7 +2090,7 @@ impl IntPoint {
             y: reader.read_i32::<LE>()?,
         })
     }
-    fn write<W: Write>(&self, writer: &mut Context<W>) -> Result<()> {
+    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
         writer.write_i32::<LE>(self.x)?;
         writer.write_i32::<LE>(self.y)?;
         Ok(())
@@ -2116,7 +2125,7 @@ impl SoftObjectPath {
             }
         })
     }
-    fn write<W: Write>(&self, writer: &mut Context<W>) -> Result<()> {
+    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
         match self {
             Self::Old {
                 asset_path_name,
@@ -2150,7 +2159,7 @@ impl GameplayTag {
             name: read_string(reader)?,
         })
     }
-    fn write<W: Write>(&self, writer: &mut Context<W>) -> Result<()> {
+    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
         write_string(writer, &self.name)?;
         Ok(())
     }
@@ -2167,7 +2176,7 @@ impl GameplayTagContainer {
             gameplay_tags: read_array(reader.read_u32::<LE>()?, reader, GameplayTag::read)?,
         })
     }
-    fn write<W: Write>(&self, writer: &mut Context<W>) -> Result<()> {
+    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
         writer.write_u32::<LE>(self.gameplay_tags.len() as u32)?;
         for entry in &self.gameplay_tags {
             entry.write(writer)?;
@@ -2201,7 +2210,7 @@ impl UniqueNetIdRepl {
         };
         Ok(Self { inner })
     }
-    fn write<W: Write>(&self, writer: &mut Context<W>) -> Result<()> {
+    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
         match &self.inner {
             Some(inner) => {
                 writer.write_u32::<LE>(inner.size.into())?;
@@ -2229,7 +2238,7 @@ impl FFormatArgumentData {
     }
 }
 impl FFormatArgumentData {
-    fn write<W: Write>(&self, writer: &mut Context<W>) -> Result<()> {
+    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
         write_string(writer, &self.name)?;
         self.value.write(writer)?;
         Ok(())
@@ -2264,7 +2273,7 @@ impl FFormatArgumentDataValue {
     }
 }
 impl FFormatArgumentDataValue {
-    fn write<W: Write>(&self, writer: &mut Context<W>) -> Result<()> {
+    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
         match self {
             Self::Int(value) => {
                 writer.write_u8(0)?;
@@ -2323,7 +2332,7 @@ impl FFormatArgumentValue {
     }
 }
 impl FFormatArgumentValue {
-    fn write<W: Write>(&self, writer: &mut Context<W>) -> Result<()> {
+    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
         match self {
             Self::Int(value) => {
                 writer.write_u8(0)?;
@@ -2379,7 +2388,7 @@ impl FNumberFormattingOptions {
     }
 }
 impl FNumberFormattingOptions {
-    fn write<W: Write>(&self, writer: &mut Context<W>) -> Result<()> {
+    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
         writer.write_u32::<LE>(self.always_sign as u32)?;
         writer.write_u32::<LE>(self.use_grouping as u32)?;
         writer.write_i8(self.rounding_mode)?;
@@ -2482,7 +2491,7 @@ impl Text {
     }
 }
 impl Text {
-    fn write<W: Write>(&self, writer: &mut Context<W>) -> Result<()> {
+    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
         writer.write_u32::<LE>(self.flags)?;
         match &self.variant {
             TextVariant::None { culture_invariant } => {
@@ -2689,7 +2698,7 @@ impl PropertyValue {
             },
         })
     }
-    fn write<W: Write>(&self, writer: &mut Context<W>) -> Result<()> {
+    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
         match &self {
             PropertyValue::Int(v) => writer.write_i32::<LE>(*v)?,
             PropertyValue::Int8(v) => writer.write_i8(*v)?,
@@ -2744,7 +2753,7 @@ impl StructValue {
             StructType::Struct(_) => StructValue::Struct(read_properties_until_none(reader)?),
         })
     }
-    fn write<W: Write>(&self, writer: &mut Context<W>) -> Result<()> {
+    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
         match self {
             StructValue::Guid(v) => v.write(writer)?,
             StructValue::DateTime(v) => writer.write_u64::<LE>(*v)?,
@@ -2828,7 +2837,7 @@ impl ValueVec {
             _ => return Err(Error::UnknownVecType(format!("{t:?}"))),
         })
     }
-    fn write<W: Write>(&self, writer: &mut Context<W>) -> Result<()> {
+    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
         match &self {
             ValueVec::Int8(v) => {
                 writer.write_u32::<LE>(v.len() as u32)?;
@@ -2989,7 +2998,7 @@ impl ValueArray {
             _ => ValueArray::Base(ValueVec::read(reader, &tag.basic_type(), size, count)?),
         })
     }
-    fn write<W: Write>(&self, writer: &mut Context<W>, tag: &PropertyTagFull) -> Result<()> {
+    fn write<W: Write + Seek>(&self, writer: &mut Context<W>, tag: &PropertyTagFull) -> Result<()> {
         match &self {
             ValueArray::Struct {
                 type_,
@@ -3000,8 +3009,9 @@ impl ValueArray {
                 writer.write_u32::<LE>(value.len() as u32)?;
 
                 let mut buf = vec![];
+                let mut cur = Cursor::new(&mut buf);
                 for v in value {
-                    writer.with_stream(&mut buf, |writer| v.write(writer))?;
+                    writer.with_stream(&mut cur, |writer| v.write(writer))?;
                 }
 
                 if !writer.version().property_tag() && writer.version().array_inner_tag() {
@@ -3041,7 +3051,7 @@ impl ValueSet {
             _ => ValueSet::Base(ValueVec::read(reader, &t.basic_type(), size, count)?),
         })
     }
-    fn write<W: Write>(&self, writer: &mut Context<W>) -> Result<()> {
+    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
         match &self {
             ValueSet::Struct(value) => {
                 writer.write_u32::<LE>(value.len() as u32)?;
@@ -3218,7 +3228,11 @@ impl Property {
             },
         })
     }
-    fn write<W: Write>(&self, writer: &mut Context<W>, tag: &PropertyTagFull) -> Result<usize> {
+    fn write<W: Write + Seek>(
+        &self,
+        writer: &mut Context<W>,
+        tag: &PropertyTagFull,
+    ) -> Result<usize> {
         Ok(match &self.inner {
             PropertyInner::Int8(value) => {
                 writer.write_i8(*value)?;
@@ -3277,90 +3291,100 @@ impl Property {
             }
             PropertyInner::Name(value) => {
                 let mut buf = vec![];
-                writer.with_stream(&mut buf, |writer| write_string(writer, value))?;
+                writer.with_stream(&mut Cursor::new(&mut buf), |writer| {
+                    write_string(writer, value)
+                })?;
                 writer.write_all(&buf)?;
                 buf.len()
             }
             PropertyInner::Str(value) => {
                 let mut buf = vec![];
-                writer.with_stream(&mut buf, |writer| write_string(writer, value))?;
+                writer.with_stream(&mut Cursor::new(&mut buf), |writer| {
+                    write_string(writer, value)
+                })?;
                 writer.write_all(&buf)?;
                 buf.len()
             }
             PropertyInner::FieldPath(value) => {
                 let mut buf = vec![];
-                writer.with_stream(&mut buf, |writer| value.write(writer))?;
+                writer.with_stream(&mut Cursor::new(&mut buf), |writer| value.write(writer))?;
                 writer.write_all(&buf)?;
                 buf.len()
             }
             PropertyInner::SoftObject(value) => {
                 let mut buf = vec![];
-                writer.with_stream(&mut buf, |writer| value.write(writer))?;
+                writer.with_stream(&mut Cursor::new(&mut buf), |writer| value.write(writer))?;
                 writer.write_all(&buf)?;
                 buf.len()
             }
             PropertyInner::Object(value) => {
                 let mut buf = vec![];
-                writer.with_stream(&mut buf, |writer| write_string(writer, value))?;
+                writer.with_stream(&mut Cursor::new(&mut buf), |writer| {
+                    write_string(writer, value)
+                })?;
                 writer.write_all(&buf)?;
                 buf.len()
             }
             PropertyInner::Text(value) => {
                 let mut buf = vec![];
-                writer.with_stream(&mut buf, |writer| value.write(writer))?;
+                writer.with_stream(&mut Cursor::new(&mut buf), |writer| value.write(writer))?;
                 writer.write_all(&buf)?;
                 buf.len()
             }
             PropertyInner::Delegate(value) => {
                 let mut buf = vec![];
-                writer.with_stream(&mut buf, |writer| value.write(writer))?;
+                writer.with_stream(&mut Cursor::new(&mut buf), |writer| value.write(writer))?;
                 writer.write_all(&buf)?;
                 buf.len()
             }
             PropertyInner::MulticastDelegate(value) => {
                 let mut buf = vec![];
-                writer.with_stream(&mut buf, |writer| value.write(writer))?;
+                writer.with_stream(&mut Cursor::new(&mut buf), |writer| value.write(writer))?;
                 writer.write_all(&buf)?;
                 buf.len()
             }
             PropertyInner::MulticastInlineDelegate(value) => {
                 let mut buf = vec![];
-                writer.with_stream(&mut buf, |writer| value.write(writer))?;
+                writer.with_stream(&mut Cursor::new(&mut buf), |writer| value.write(writer))?;
                 writer.write_all(&buf)?;
                 buf.len()
             }
             PropertyInner::MulticastSparseDelegate(value) => {
                 let mut buf = vec![];
-                writer.with_stream(&mut buf, |writer| value.write(writer))?;
+                writer.with_stream(&mut Cursor::new(&mut buf), |writer| value.write(writer))?;
                 writer.write_all(&buf)?;
                 buf.len()
             }
             PropertyInner::Set(value) => {
                 let mut buf = vec![];
-                buf.write_u32::<LE>(0)?;
-                writer.with_stream(&mut buf, |writer| value.write(writer))?;
+                let mut cur = Cursor::new(&mut buf);
+                cur.write_u32::<LE>(0)?;
+                writer.with_stream(&mut cur, |writer| value.write(writer))?;
                 writer.write_all(&buf)?;
                 buf.len()
             }
             PropertyInner::Map(value) => {
                 let mut buf = vec![];
-                buf.write_u32::<LE>(0)?;
-                buf.write_u32::<LE>(value.len() as u32)?;
+                let mut cur = Cursor::new(&mut buf);
+                cur.write_u32::<LE>(0)?;
+                cur.write_u32::<LE>(value.len() as u32)?;
                 for v in value {
-                    writer.with_stream(&mut buf, |writer| v.write(writer))?;
+                    writer.with_stream(&mut cur, |writer| v.write(writer))?;
                 }
                 writer.write_all(&buf)?;
                 buf.len()
             }
             PropertyInner::Struct(value) => {
                 let mut buf = vec![];
-                writer.with_stream(&mut buf, |writer| value.write(writer))?;
+                writer.with_stream(&mut Cursor::new(&mut buf), |writer| value.write(writer))?;
                 writer.write_all(&buf)?;
                 buf.len()
             }
             PropertyInner::Array(value) => {
                 let mut buf = vec![];
-                writer.with_stream(&mut buf, |writer| value.write(writer, tag))?;
+                writer.with_stream(&mut Cursor::new(&mut buf), |writer| {
+                    value.write(writer, tag)
+                })?;
                 writer.write_all(&buf)?;
                 buf.len()
             }
@@ -3387,7 +3411,7 @@ impl CustomFormatData {
     }
 }
 impl CustomFormatData {
-    fn write<W: Write>(&self, writer: &mut Context<W>) -> Result<()> {
+    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
         self.id.write(writer)?;
         writer.write_i32::<LE>(self.value)?;
         Ok(())
@@ -3489,7 +3513,7 @@ impl Header {
     }
 }
 impl Header {
-    fn write<W: Write>(&self, writer: &mut Context<W>) -> Result<()> {
+    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
         writer.write_u32::<LE>(self.magic)?;
         writer.write_u32::<LE>(self.save_game_version)?;
         writer.write_u32::<LE>(self.package_version.ue4)?;
@@ -3531,7 +3555,7 @@ impl Root {
             properties,
         })
     }
-    fn write<W: Write>(&self, writer: &mut Context<W>) -> Result<()> {
+    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
         write_string(writer, &self.save_game_type)?;
         if writer.version().property_tag() {
             writer.write_u8(0)?;
@@ -3559,13 +3583,16 @@ impl Save {
         SaveReader::new().types(types).read(reader)
     }
     pub fn write<W: Write>(&self, writer: &mut W) -> Result<()> {
-        Context::run(writer, |writer| {
+        let mut buffer = vec![];
+        Context::run(&mut Cursor::new(&mut buffer), |writer| -> Result<()> {
             writer.set_version(self.header.clone());
             self.header.write(writer)?;
             self.root.write(writer)?;
             writer.write_all(&self.extra)?;
             Ok(())
-        })
+        })?;
+        writer.write_all(&buffer)?;
+        Ok(())
     }
 }
 

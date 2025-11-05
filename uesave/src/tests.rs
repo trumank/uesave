@@ -109,7 +109,9 @@ fn test_header() -> Result<()> {
     let mut reader = Cursor::new(&original);
     let header = run(&mut reader, Header::read)?;
     let mut reconstructed = vec![];
-    run(&mut reconstructed, |writer| header.write(writer))?;
+    run(&mut Cursor::new(&mut reconstructed), |writer| {
+        header.write(writer)
+    })?;
     assert_eq!(original, &reconstructed[..]);
     Ok(())
 }
@@ -118,7 +120,7 @@ fn test_header() -> Result<()> {
 fn test_uuid() -> Result<()> {
     let id = FGuid::parse_str("2eb5fdbd4d1001ac8ff33681daa59333")?;
     let mut writer = vec![];
-    run(&mut writer, |writer| id.write(writer))?;
+    run(&mut Cursor::new(&mut writer), |writer| id.write(writer))?;
     let mut reader = Cursor::new(&writer);
     let rid = run(&mut reader, FGuid::read)?;
     assert_eq!(id, rid);
@@ -129,7 +131,7 @@ fn test_uuid() -> Result<()> {
 fn test_uuid2() -> Result<()> {
     let id = FGuid::parse_str("85b20ca1-49fb-7138-a154-c89a2c20e2cd")?;
     let mut writer = vec![];
-    run(&mut writer, |writer| id.write(writer))?;
+    run(&mut Cursor::new(&mut writer), |writer| id.write(writer))?;
     assert_eq!(
         writer,
         [
@@ -153,7 +155,7 @@ fn test_rw_save1() -> Result<()> {
     let mut reader = Cursor::new(&SAVE);
     let obj = Save::read(&mut reader).unwrap();
     let mut reconstructed: Vec<u8> = vec![];
-    obj.write(&mut reconstructed)?;
+    obj.write(&mut Cursor::new(&mut reconstructed))?;
     assert_eq!(SAVE, reconstructed);
     Ok(())
 }
@@ -290,7 +292,7 @@ fn rw_property(original: &[u8]) -> Result<()> {
         let property = read_property(reader)?.unwrap();
         println!("{property:#?}");
         let mut reconstructed: Vec<u8> = vec![];
-        run(&mut reconstructed, |writer| {
+        run(&mut Cursor::new(&mut reconstructed), |writer| {
             write_property((&property.0, &property.1), writer)
         })?;
         assert_eq!(original, &reconstructed[..]);
@@ -604,7 +606,9 @@ fn test_rw_header() -> Result<()> {
     run(&mut reader, |reader| {
         let obj = Header::read(reader)?;
         let mut reconstructed: Vec<u8> = vec![];
-        run(&mut reconstructed, |writer| obj.write(writer))?;
+        run(&mut Cursor::new(&mut reconstructed), |writer| {
+            obj.write(writer)
+        })?;
         assert_eq!(original, &reconstructed[..]);
         Ok(())
     })
