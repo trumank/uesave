@@ -559,49 +559,54 @@ impl Types {
     }
 }
 
-#[derive(Debug)]
-enum Scope<'p, 'n> {
-    Root,
-    Node {
-        parent: &'p Scope<'p, 'p>,
-        name: &'n str,
-    },
+/// Represents the current position in the property hierarchy as a stack of names.
+/// Used for looking up type hints in the Types map.
+#[derive(Debug, Clone, Default)]
+struct Scope {
+    components: Vec<String>,
 }
 
-impl Scope<'_, '_> {
+impl Scope {
+    fn root() -> Self {
+        Self::default()
+    }
+
     fn path(&self) -> String {
-        match self {
-            Self::Root => "".into(),
-            Self::Node { parent, name } => {
-                format!("{}.{}", parent.path(), name)
-            }
-        }
+        self.components.join(".")
+    }
+
+    fn push(&mut self, name: &str) {
+        self.components.push(name.to_string());
+    }
+
+    fn pop(&mut self) {
+        self.components.pop();
     }
 }
 
 #[derive(Debug)]
-struct Context<'stream, 'types, 'scope, S> {
+struct Context<'stream, 'types, S> {
     stream: &'stream mut S,
-    state: ContextState<'types, 'scope>,
+    state: ContextState<'types>,
 }
 #[derive(Debug)]
-struct ContextState<'types, 'scope> {
+struct ContextState<'types> {
     version: Option<Header>,
     types: &'types Types,
-    scope: &'scope Scope<'scope, 'scope>,
+    scope: Scope,
     log: bool,
 }
-impl<R: Read> Read for Context<'_, '_, '_, R> {
+impl<R: Read> Read for Context<'_, '_, R> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         self.stream.read(buf)
     }
 }
-impl<S: Seek> Seek for Context<'_, '_, '_, S> {
+impl<S: Seek> Seek for Context<'_, '_, S> {
     fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
         self.stream.seek(pos)
     }
 }
-impl<W: Write> Write for Context<'_, '_, '_, W> {
+impl<W: Write> Write for Context<'_, '_, W> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         self.stream.write(buf)
     }
@@ -610,50 +615,42 @@ impl<W: Write> Write for Context<'_, '_, '_, W> {
     }
 }
 
-impl<'stream, 'scope, S> Context<'stream, '_, 'scope, S> {
+impl<'stream, S> Context<'stream, '_, S> {
     fn run<F, T>(stream: &'stream mut S, f: F) -> T
     where
-        F: FnOnce(&mut Context<'stream, '_, 'scope, S>) -> T,
+        F: FnOnce(&mut Context<'stream, '_, S>) -> T,
     {
-        f(&mut Context::<'stream, '_, 'scope> {
+        f(&mut Context::<'stream, '_> {
             stream,
             state: ContextState {
                 version: None,
                 types: &Types::new(),
-                scope: &Scope::Root,
+                scope: Scope::root(),
                 log: false,
             },
         })
     }
 }
-impl<'types, S> Context<'_, 'types, '_, S> {
-    fn with_scope<'name, F, T>(&mut self, name: &'name str, f: F) -> T
+impl<'types, S> Context<'_, 'types, S> {
+    fn with_scope<F, T>(&mut self, name: &str, f: F) -> T
     where
-        F: FnOnce(&mut Context<'_, 'types, '_, S>) -> T,
+        F: FnOnce(&mut Context<'_, 'types, S>) -> T,
     {
-        f(&mut Context {
-            stream: self.stream,
-            state: ContextState {
-                scope: &Scope::Node {
-                    name,
-                    parent: self.state.scope,
-                },
-                version: self.state.version.clone(),
-                types: self.state.types,
-                log: self.state.log,
-            },
-        })
+        self.state.scope.push(name);
+        let result = f(self);
+        self.state.scope.pop();
+        result
     }
     fn with_stream<'s, F, T, S2>(&mut self, stream: &'s mut S2, f: F) -> T
     where
-        F: FnOnce(&mut Context<'_, 'types, '_, S2>) -> T,
+        F: FnOnce(&mut Context<'_, 'types, S2>) -> T,
     {
         f(&mut Context {
             stream,
             state: ContextState {
                 version: self.state.version.clone(),
                 types: self.state.types,
-                scope: self.state.scope,
+                scope: self.state.scope.clone(),
                 log: self.state.log,
             },
         })
@@ -674,7 +671,7 @@ impl<'types, S> Context<'_, 'types, '_, S> {
         self.state.log
     }
 }
-impl<'types, R: Read + Seek> Context<'_, 'types, '_, R> {
+impl<'types, R: Read + Seek> Context<'_, 'types, R> {
     fn get_type_or<'t>(&mut self, t: &'t StructType) -> Result<&'t StructType>
     where
         'types: 't,
@@ -3615,7 +3612,7 @@ impl<'types> SaveReader<'types> {
             state: ContextState {
                 version: None,
                 types,
-                scope: &Scope::Root,
+                scope: Scope::root(),
                 log: self.log,
             },
         };
