@@ -128,7 +128,7 @@ pub fn main() -> Result<()> {
 
             let save = SaveReader::new()
                 .log(!action.no_warn)
-                .types(&types)
+                .types(types)
                 .read(input(&action.input)?)?;
             serde_json::to_writer_pretty(output(&action.output)?, &save)?;
         }
@@ -155,7 +155,7 @@ pub fn main() -> Result<()> {
             let mut input = std::io::Cursor::new(fs::read(path)?);
             let mut output = std::io::Cursor::new(vec![]);
 
-            let sr = SaveReader::new().log(!action.no_warn).types(&types);
+            let sr = SaveReader::new().log(!action.no_warn).types(types);
             if action.trace {
                 ser_hex::read("trace.json", &mut input, |reader| sr.read(reader))?
             } else {
@@ -181,7 +181,7 @@ pub fn main() -> Result<()> {
 
             let save = SaveReader::new()
                 .log(!action.no_warn)
-                .types(&types)
+                .types(types)
                 .read(Cursor::new(fs::read(&action.path)?))?;
             let modified_save: Save = serde_json::from_slice(&edit::edit_bytes_with_builder(
                 serde_json::to_vec_pretty(&save)?,

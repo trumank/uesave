@@ -585,28 +585,28 @@ impl Scope {
 }
 
 #[derive(Debug)]
-struct Context<'types, S> {
+struct Context<S> {
     stream: S,
-    state: ContextState<'types>,
+    state: ContextState,
 }
 #[derive(Debug)]
-struct ContextState<'types> {
+struct ContextState {
     version: Option<Header>,
-    types: &'types Types,
+    types: Rc<Types>,
     scope: Scope,
     log: bool,
 }
-impl<R: Read> Read for Context<'_, R> {
+impl<R: Read> Read for Context<R> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         self.stream.read(buf)
     }
 }
-impl<S: Seek> Seek for Context<'_, S> {
+impl<S: Seek> Seek for Context<S> {
     fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
         self.stream.seek(pos)
     }
 }
-impl<W: Write> Write for Context<'_, W> {
+impl<W: Write> Write for Context<W> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         self.stream.write(buf)
     }
@@ -615,26 +615,24 @@ impl<W: Write> Write for Context<'_, W> {
     }
 }
 
-impl<S> Context<'_, S> {
+impl<S> Context<S> {
     fn run<F, T>(stream: S, f: F) -> T
     where
-        F: FnOnce(&mut Context<'_, S>) -> T,
+        F: FnOnce(&mut Context<S>) -> T,
     {
-        f(&mut Context::<'_> {
+        f(&mut Context {
             stream,
             state: ContextState {
                 version: None,
-                types: &Types::new(),
+                types: Rc::new(Types::new()),
                 scope: Scope::root(),
                 log: false,
             },
         })
     }
-}
-impl<'types, S> Context<'types, S> {
     fn with_scope<F, T>(&mut self, name: &str, f: F) -> T
     where
-        F: FnOnce(&mut Context<'types, S>) -> T,
+        F: FnOnce(&mut Context<S>) -> T,
     {
         self.state.scope.push(name);
         let result = f(self);
@@ -643,13 +641,13 @@ impl<'types, S> Context<'types, S> {
     }
     fn with_stream<F, T, S2>(&mut self, stream: S2, f: F) -> T
     where
-        F: FnOnce(&mut Context<'types, S2>) -> T,
+        F: FnOnce(&mut Context<S2>) -> T,
     {
         f(&mut Context {
             stream,
             state: ContextState {
                 version: self.state.version.clone(),
-                types: self.state.types,
+                types: self.state.types.clone(),
                 scope: self.state.scope.clone(),
                 log: self.state.log,
             },
@@ -658,7 +656,7 @@ impl<'types, S> Context<'types, S> {
     fn path(&self) -> String {
         self.state.scope.path()
     }
-    fn get_type(&self) -> Option<&'types StructType> {
+    fn get_type(&self) -> Option<&StructType> {
         self.state.types.types.get(&self.path())
     }
     fn set_version(&mut self, version: Header) {
@@ -671,13 +669,10 @@ impl<'types, S> Context<'types, S> {
         self.state.log
     }
 }
-impl<'types, R: Read + Seek> Context<'types, R> {
-    fn get_type_or<'t>(&mut self, t: &'t StructType) -> Result<&'t StructType>
-    where
-        'types: 't,
-    {
+impl<R: Read + Seek> Context<R> {
+    fn get_type_or(&mut self, t: &StructType) -> Result<StructType> {
         let offset = self.stream.stream_position()?;
-        Ok(self.get_type().unwrap_or_else(|| {
+        Ok(self.get_type().cloned().unwrap_or_else(|| {
             if self.log() {
                 eprintln!(
                     "offset {}: StructType for \"{}\" unspecified, assuming {:?}",
@@ -686,7 +681,7 @@ impl<'types, R: Read + Seek> Context<'types, R> {
                     t
                 );
             }
-            t
+            t.clone()
         }))
     }
 }
@@ -1020,7 +1015,7 @@ impl PropertyTagFull<'_> {
                         let key_type = PropertyType::read(reader)?;
                         let key_struct_type = match key_type {
                             PropertyType::StructProperty => {
-                                Some(reader.get_type_or(&StructType::Guid)?.clone())
+                                Some(reader.get_type_or(&StructType::Guid)?)
                             }
                             _ => None,
                         };
@@ -1035,21 +1030,17 @@ impl PropertyTagFull<'_> {
                         let key_type = PropertyType::read(reader)?;
                         let key_struct_type = match key_type {
                             PropertyType::StructProperty => Some(
-                                reader
-                                    .with_scope("Key", |r| r.get_type_or(&StructType::Guid))?
-                                    .clone(),
+                                reader.with_scope("Key", |r| r.get_type_or(&StructType::Guid))?,
                             ),
                             _ => None,
                         };
                         let value_type = PropertyType::read(reader)?;
                         let value_struct_type = match value_type {
-                            PropertyType::StructProperty => Some(
-                                reader
-                                    .with_scope("Value", |r| {
-                                        r.get_type_or(&StructType::Struct(None))
-                                    })?
-                                    .clone(),
-                            ),
+                            PropertyType::StructProperty => {
+                                Some(reader.with_scope("Value", |r| {
+                                    r.get_type_or(&StructType::Struct(None))
+                                })?)
+                            }
                             _ => None,
                         };
 
@@ -3560,11 +3551,11 @@ impl Save {
     /// Reads save from the given reader
     #[instrument(name = "Root_read", skip_all)]
     pub fn read<R: Read>(reader: &mut R) -> Result<Self, ParseError> {
-        Self::read_with_types(reader, &Types::new())
+        Self::read_with_types(reader, Types::new())
     }
     /// Reads save from the given reader using the provided [`Types`]
     #[instrument(name = "Save_read_with_types", skip_all)]
-    pub fn read_with_types<R: Read>(reader: &mut R, types: &Types) -> Result<Self, ParseError> {
+    pub fn read_with_types<R: Read>(reader: &mut R, types: Types) -> Result<Self, ParseError> {
         SaveReader::new().types(types).read(reader)
     }
     pub fn write<W: Write>(&self, writer: &mut W) -> Result<()> {
@@ -3578,16 +3569,16 @@ impl Save {
     }
 }
 
-pub struct SaveReader<'types> {
+pub struct SaveReader {
     log: bool,
-    types: Option<&'types Types>,
+    types: Option<Rc<Types>>,
 }
-impl Default for SaveReader<'_> {
+impl Default for SaveReader {
     fn default() -> Self {
         Self::new()
     }
 }
-impl<'types> SaveReader<'types> {
+impl SaveReader {
     pub fn new() -> Self {
         Self {
             log: false,
@@ -3598,13 +3589,12 @@ impl<'types> SaveReader<'types> {
         self.log = log;
         self
     }
-    pub fn types(mut self, types: &'types Types) -> Self {
-        self.types = Some(types);
+    pub fn types(mut self, types: Types) -> Self {
+        self.types = Some(Rc::new(types));
         self
     }
     pub fn read<S: Read>(self, stream: S) -> Result<Save, ParseError> {
-        let tmp = Types::new();
-        let types = self.types.unwrap_or(&tmp);
+        let types = self.types.unwrap_or_else(|| Rc::new(Types::new()));
 
         let stream = SeekReader::new(stream);
         let mut reader = Context {
