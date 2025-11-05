@@ -381,41 +381,36 @@ impl<'a> IntoIterator for &'a Properties {
 }
 
 #[instrument(skip_all)]
-fn read_properties_until_none<R: Read + Seek>(reader: &mut Context<R>) -> Result<Properties> {
+fn read_properties_until_none<A: ArchiveReader>(ar: &mut A) -> Result<Properties> {
     let mut properties = Properties::default();
-    while let Some((name, prop)) = read_property(reader)? {
+    while let Some((name, prop)) = read_property(ar)? {
         properties.insert(name, prop);
     }
     Ok(properties)
 }
 #[instrument(skip_all)]
-fn write_properties_none_terminated<W: Write + Seek>(
-    writer: &mut Context<W>,
+fn write_properties_none_terminated<A: ArchiveWriter>(
+    ar: &mut A,
     properties: &Properties,
 ) -> Result<()> {
     for p in properties {
-        write_property(p, writer)?;
+        write_property(p, ar)?;
     }
-    write_string(writer, "None")?;
+    write_string(ar, "None")?;
     Ok(())
 }
 
 #[instrument(skip_all)]
-fn read_property<R: Read + Seek>(
-    reader: &mut Context<R>,
-) -> Result<Option<(PropertyKey, Property)>> {
-    if let Some(tag) = PropertyTagFull::read(reader)? {
-        let value = reader.with_scope(&tag.name, |reader| Property::read(reader, tag.clone()))?;
+fn read_property<A: ArchiveReader>(ar: &mut A) -> Result<Option<(PropertyKey, Property)>> {
+    if let Some(tag) = PropertyTagFull::read(ar)? {
+        let value = ar.with_scope(&tag.name, |ar| Property::read(ar, tag.clone()))?;
         Ok(Some((PropertyKey(tag.index, tag.name.to_string()), value)))
     } else {
         Ok(None)
     }
 }
 #[instrument(skip_all)]
-fn write_property<W: Write + Seek>(
-    prop: (&PropertyKey, &Property),
-    writer: &mut Context<W>,
-) -> Result<()> {
+fn write_property<A: ArchiveWriter>(prop: (&PropertyKey, &Property), ar: &mut A) -> Result<()> {
     let mut tag = prop
         .1
         .tag
@@ -424,24 +419,24 @@ fn write_property<W: Write + Seek>(
 
     // Write tag with placeholder size
     tag.size = 0;
-    let tag_start = writer.stream_position()?;
-    tag.write(writer)?;
-    let data_start = writer.stream_position()?;
+    let tag_start = ar.stream_position()?;
+    tag.write(ar)?;
+    let data_start = ar.stream_position()?;
 
     // Write the actual property data
-    prop.1.write(writer, &tag)?;
-    let data_end = writer.stream_position()?;
+    prop.1.write(ar, &tag)?;
+    let data_end = ar.stream_position()?;
 
     // Calculate actual size
     let size = (data_end - data_start) as u32;
     tag.size = size;
 
     // Seek back and rewrite the tag with correct size
-    writer.seek(std::io::SeekFrom::Start(tag_start))?;
-    tag.write(writer)?;
+    ar.seek(std::io::SeekFrom::Start(tag_start))?;
+    tag.write(ar)?;
 
     // Seek to end to continue writing
-    writer.seek(std::io::SeekFrom::Start(data_end))?;
+    ar.seek(std::io::SeekFrom::Start(data_end))?;
     Ok(())
 }
 
@@ -745,23 +740,23 @@ impl PropertyTagFull<'_> {
         }
     }
     #[instrument(name = "PropertyTag_read", skip_all)]
-    fn read<R: Read + Seek>(reader: &mut Context<R>) -> Result<Option<Self>> {
-        let name = read_string(reader)?;
+    fn read<A: ArchiveReader>(ar: &mut A) -> Result<Option<Self>> {
+        let name = read_string(ar)?;
         if name == "None" {
             return Ok(None);
         }
-        if reader.version().property_tag() {
-            let root_node = read_node(reader)?;
+        if ar.version().property_tag() {
+            let root_node = read_node(ar)?;
 
             #[derive(Default, Debug)]
             struct Node {
                 name: String,
                 inner: Vec<Node>,
             }
-            fn read_node<R: Read + Seek>(reader: &mut Context<R>) -> Result<Node> {
+            fn read_node<A: ArchiveReader>(ar: &mut A) -> Result<Node> {
                 Ok(Node {
-                    name: read_string(reader)?,
-                    inner: read_array(reader.read_u32::<LE>()?, reader, read_node)?,
+                    name: read_string(ar)?,
+                    inner: read_array(ar.read_u32::<LE>()?, ar, read_node)?,
                 })
             }
             fn read_path(node: &Node) -> Result<String> {
@@ -818,9 +813,9 @@ impl PropertyTagFull<'_> {
                 })
             }
 
-            let size = reader.read_u32::<LE>()?;
+            let size = ar.read_u32::<LE>()?;
 
-            let flags = EPropertyTagFlags::from_bits(reader.read_u8()?)
+            let flags = EPropertyTagFlags::from_bits(ar.read_u8()?)
                 .ok_or_else(|| error::Error::Other("unknown EPropertyTagFlags bits".into()))?;
 
             let mut tag = Self {
@@ -832,10 +827,10 @@ impl PropertyTagFull<'_> {
             };
 
             if flags.contains(EPropertyTagFlags::HasArrayIndex) {
-                tag.index = reader.read_u32::<LE>()?;
+                tag.index = ar.read_u32::<LE>()?;
             }
             if flags.contains(EPropertyTagFlags::HasPropertyGuid) {
-                tag.id = Some(FGuid::read(reader)?);
+                tag.id = Some(FGuid::read(ar)?);
             }
             if flags.contains(EPropertyTagFlags::HasPropertyExtensions) {
                 unimplemented!();
@@ -843,13 +838,13 @@ impl PropertyTagFull<'_> {
 
             Ok(Some(tag))
         } else {
-            reader.with_scope(&name.clone(), |reader| {
-                let type_ = PropertyType::read(reader)?;
-                let size = reader.read_u32::<LE>()?;
-                let index = reader.read_u32::<LE>()?;
+            ar.with_scope(&name.clone(), |ar| {
+                let type_ = PropertyType::read(ar)?;
+                let size = ar.read_u32::<LE>()?;
+                let index = ar.read_u32::<LE>()?;
                 let data = match type_ {
                     PropertyType::BoolProperty => {
-                        let value = reader.read_u8()? > 0;
+                        let value = ar.read_u8()? > 0;
                         PropertyTagDataFull::Bool(value)
                     }
                     PropertyType::IntProperty
@@ -875,25 +870,25 @@ impl PropertyTagFull<'_> {
                         PropertyTagDataFull::Other(type_)
                     }
                     PropertyType::ByteProperty => {
-                        let enum_type = read_string(reader)?;
+                        let enum_type = read_string(ar)?;
                         PropertyTagDataFull::Byte((enum_type != "None").then_some(enum_type))
                     }
                     PropertyType::EnumProperty => {
-                        let enum_type = read_string(reader)?;
+                        let enum_type = read_string(ar)?;
                         PropertyTagDataFull::Enum(enum_type, None)
                     }
                     PropertyType::ArrayProperty => {
-                        let inner_type = PropertyType::read(reader)?;
+                        let inner_type = PropertyType::read(ar)?;
 
                         PropertyTagDataFull::Array(std::boxed::Box::new(
                             PropertyTagDataFull::from_type(inner_type, None),
                         ))
                     }
                     PropertyType::SetProperty => {
-                        let key_type = PropertyType::read(reader)?;
+                        let key_type = PropertyType::read(ar)?;
                         let key_struct_type = match key_type {
                             PropertyType::StructProperty => {
-                                Some(reader.get_type_or(&StructType::Guid)?)
+                                Some(ar.get_type_or(&StructType::Guid)?)
                             }
                             _ => None,
                         };
@@ -905,20 +900,18 @@ impl PropertyTagFull<'_> {
                         PropertyTagDataFull::Set { key_type }
                     }
                     PropertyType::MapProperty => {
-                        let key_type = PropertyType::read(reader)?;
+                        let key_type = PropertyType::read(ar)?;
                         let key_struct_type = match key_type {
-                            PropertyType::StructProperty => Some(
-                                reader.with_scope("Key", |r| r.get_type_or(&StructType::Guid))?,
-                            ),
+                            PropertyType::StructProperty => {
+                                Some(ar.with_scope("Key", |r| r.get_type_or(&StructType::Guid))?)
+                            }
                             _ => None,
                         };
-                        let value_type = PropertyType::read(reader)?;
+                        let value_type = PropertyType::read(ar)?;
                         let value_struct_type = match value_type {
-                            PropertyType::StructProperty => {
-                                Some(reader.with_scope("Value", |r| {
-                                    r.get_type_or(&StructType::Struct(None))
-                                })?)
-                            }
+                            PropertyType::StructProperty => Some(ar.with_scope("Value", |r| {
+                                r.get_type_or(&StructType::Struct(None))
+                            })?),
                             _ => None,
                         };
 
@@ -935,16 +928,16 @@ impl PropertyTagFull<'_> {
                         }
                     }
                     PropertyType::StructProperty => {
-                        let struct_type = StructType::read(reader)?;
-                        let struct_id = FGuid::read(reader)?;
+                        let struct_type = StructType::read(ar)?;
+                        let struct_id = FGuid::read(ar)?;
                         PropertyTagDataFull::Struct {
                             struct_type,
                             id: struct_id,
                         }
                     }
                 };
-                let id = if reader.version().property_guid() {
-                    read_optional_uuid(reader)?
+                let id = if ar.version().property_guid() {
+                    read_optional_uuid(ar)?
                 } else {
                     None
                 };
@@ -958,136 +951,129 @@ impl PropertyTagFull<'_> {
             })
         }
     }
-    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
-        write_string(writer, &self.name)?;
+    fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
+        write_string(ar, &self.name)?;
 
-        if writer.version().property_tag() {
-            fn write_node<W: Write + Seek>(
-                writer: &mut Context<W>,
+        if ar.version().property_tag() {
+            fn write_node<A: ArchiveWriter>(
+                ar: &mut A,
                 name: &str,
                 inner_count: u32,
             ) -> Result<()> {
-                write_string(writer, name)?;
-                writer.write_u32::<LE>(inner_count)?;
+                write_string(ar, name)?;
+                ar.write_u32::<LE>(inner_count)?;
                 Ok(())
             }
-            fn write_full_type<W: Write + Seek>(
-                writer: &mut Context<W>,
-                full_type: &str,
-            ) -> Result<()> {
+            fn write_full_type<A: ArchiveWriter>(ar: &mut A, full_type: &str) -> Result<()> {
                 let (a, b) = full_type.split_once('.').unwrap(); // TODO
-                write_node(writer, b, 1)?;
-                write_node(writer, a, 0)?;
+                write_node(ar, b, 1)?;
+                write_node(ar, a, 0)?;
                 Ok(())
             }
-            fn write_nodes<W: Write + Seek>(
-                writer: &mut Context<W>,
+            fn write_nodes<A: ArchiveWriter>(
+                ar: &mut A,
                 flags: &mut EPropertyTagFlags,
                 data: &PropertyTagDataFull,
             ) -> Result<()> {
                 match data {
                     PropertyTagDataFull::Array(inner) => {
-                        write_node(writer, "ArrayProperty", 1)?;
-                        write_nodes(writer, flags, inner)?;
+                        write_node(ar, "ArrayProperty", 1)?;
+                        write_nodes(ar, flags, inner)?;
                     }
                     PropertyTagDataFull::Struct { struct_type, id } => {
-                        write_node(writer, "StructProperty", if id.is_nil() { 1 } else { 2 })?;
+                        write_node(ar, "StructProperty", if id.is_nil() { 1 } else { 2 })?;
                         match struct_type {
                             StructType::Struct(Some(_)) => {}
                             _ => *flags |= EPropertyTagFlags::HasBinaryOrNativeSerialize,
                         }
-                        write_full_type(writer, struct_type.full_str())?;
+                        write_full_type(ar, struct_type.full_str())?;
 
                         if !id.is_nil() {
-                            write_node(writer, &id.to_string(), 0)?;
+                            write_node(ar, &id.to_string(), 0)?;
                         }
                     }
                     PropertyTagDataFull::Set { key_type } => {
-                        write_node(writer, "SetProperty", 1)?;
-                        write_nodes(writer, flags, key_type)?;
+                        write_node(ar, "SetProperty", 1)?;
+                        write_nodes(ar, flags, key_type)?;
                     }
                     PropertyTagDataFull::Map {
                         key_type,
                         value_type,
                     } => {
-                        write_node(writer, "MapProperty", 2)?;
-                        write_nodes(writer, flags, key_type)?;
-                        write_nodes(writer, flags, value_type)?;
+                        write_node(ar, "MapProperty", 2)?;
+                        write_nodes(ar, flags, key_type)?;
+                        write_nodes(ar, flags, value_type)?;
                     }
                     PropertyTagDataFull::Byte(enum_type) => {
-                        write_node(
-                            writer,
-                            "ByteProperty",
-                            if enum_type.is_some() { 1 } else { 0 },
-                        )?;
+                        write_node(ar, "ByteProperty", if enum_type.is_some() { 1 } else { 0 })?;
                         if let Some(enum_type) = enum_type {
-                            write_full_type(writer, enum_type)?;
+                            write_full_type(ar, enum_type)?;
                         }
                     }
                     PropertyTagDataFull::Enum(enum_type, container) => {
-                        write_node(writer, "EnumProperty", 2)?;
-                        write_full_type(writer, enum_type)?;
-                        write_node(writer, container.as_ref().unwrap(), 0)?;
+                        write_node(ar, "EnumProperty", 2)?;
+                        write_full_type(ar, enum_type)?;
+                        write_node(ar, container.as_ref().unwrap(), 0)?;
                     }
                     PropertyTagDataFull::Bool(value) => {
                         if *value {
                             *flags |= EPropertyTagFlags::BoolTrue;
                         }
-                        write_node(writer, "BoolProperty", 0)?;
+                        write_node(ar, "BoolProperty", 0)?;
                     }
                     PropertyTagDataFull::Other(property_type) => {
-                        write_node(writer, property_type.get_name(), 0)?;
+                        write_node(ar, property_type.get_name(), 0)?;
                     }
                 }
                 Ok(())
             }
 
             let mut flags = EPropertyTagFlags::empty();
-            write_nodes(writer, &mut flags, &self.data)?;
+            write_nodes(ar, &mut flags, &self.data)?;
 
-            writer.write_u32::<LE>(self.size)?;
+            ar.write_u32::<LE>(self.size)?;
 
             if self.id.is_some() {
                 flags |= EPropertyTagFlags::HasPropertyGuid;
             }
 
-            writer.write_u8(flags.bits())?;
+            ar.write_u8(flags.bits())?;
         } else {
-            self.data.basic_type().write(writer)?;
-            writer.write_u32::<LE>(self.size)?;
-            writer.write_u32::<LE>(self.index)?;
+            self.data.basic_type().write(ar)?;
+            ar.write_u32::<LE>(self.size)?;
+            ar.write_u32::<LE>(self.index)?;
             match &self.data {
                 PropertyTagDataFull::Array(inner_type) => {
-                    inner_type.basic_type().write(writer)?;
+                    inner_type.basic_type().write(ar)?;
                 }
                 PropertyTagDataFull::Struct { struct_type, id } => {
-                    struct_type.write(writer)?;
-                    id.write(writer)?;
+                    struct_type.write(ar)?;
+                    id.write(ar)?;
                 }
                 PropertyTagDataFull::Set { key_type, .. } => {
-                    key_type.basic_type().write(writer)?;
+                    key_type.basic_type().write(ar)?;
                 }
                 PropertyTagDataFull::Map {
                     key_type,
                     value_type,
                     ..
                 } => {
-                    key_type.basic_type().write(writer)?;
-                    value_type.basic_type().write(writer)?;
+                    key_type.basic_type().write(ar)?;
+                    value_type.basic_type().write(ar)?;
                 }
                 PropertyTagDataFull::Byte(enum_type) => {
-                    write_string(writer, enum_type.as_deref().unwrap_or("None"))?;
+                    write_string(ar, enum_type.as_deref().unwrap_or("None"))?;
                 }
                 PropertyTagDataFull::Enum(enum_type, _) => {
-                    write_string(writer, enum_type)?;
+                    write_string(ar, enum_type)?;
                 }
                 PropertyTagDataFull::Bool(value) => {
-                    writer.write_u8(*value as u8)?;
+                    ar.write_u8(*value as u8)?;
                 }
                 PropertyTagDataFull::Other(_) => {}
             }
-            if writer.version().property_guid() {
-                write_optional_uuid(writer, self.id)?;
+            if ar.version().property_guid() {
+                write_optional_uuid(ar, self.id)?;
             }
         }
         Ok(())
@@ -1157,8 +1143,8 @@ impl PropertyType {
         }
     }
     #[instrument(name = "PropertyType_read", skip_all)]
-    fn read<R: Read + Seek>(reader: &mut Context<R>) -> Result<Self> {
-        Self::try_from(&read_string(reader)?)
+    fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
+        Self::try_from(&read_string(ar)?)
     }
     fn try_from(name: &str) -> Result<Self> {
         match name {
@@ -1192,8 +1178,8 @@ impl PropertyType {
             _ => Err(Error::UnknownPropertyType(format!("{name:?}"))),
         }
     }
-    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
-        write_string(writer, self.get_name())?;
+    fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
+        write_string(ar, self.get_name())?;
         Ok(())
     }
 }
@@ -1332,11 +1318,11 @@ impl StructType {
         }
     }
     #[instrument(name = "StructType_read", skip_all)]
-    fn read<R: Read + Seek>(reader: &mut Context<R>) -> Result<Self> {
-        Ok(read_string(reader)?.into())
+    fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
+        Ok(read_string(ar)?.into())
     }
-    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
-        write_string(writer, self.as_str())?;
+    fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
+        write_string(ar, self.as_str())?;
         Ok(())
     }
     fn raw(&self) -> bool {
@@ -1592,18 +1578,18 @@ pub struct MapEntry {
 }
 impl MapEntry {
     #[instrument(name = "MapEntry_read", skip_all)]
-    fn read<R: Read + Seek>(
-        reader: &mut Context<R>,
+    fn read<A: ArchiveReader>(
+        ar: &mut A,
         key_type: &PropertyTagDataFull,
         value_type: &PropertyTagDataFull,
     ) -> Result<MapEntry> {
-        let key = PropertyValue::read(reader, key_type)?;
-        let value = PropertyValue::read(reader, value_type)?;
+        let key = PropertyValue::read(ar, key_type)?;
+        let value = PropertyValue::read(ar, value_type)?;
         Ok(Self { key, value })
     }
-    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
-        self.key.write(writer)?;
-        self.value.write(writer)?;
+    fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
+        self.key.write(ar)?;
+        self.value.write(ar)?;
         Ok(())
     }
 }
@@ -2520,291 +2506,276 @@ pub enum ValueSet {
 
 impl PropertyValue {
     #[instrument(name = "PropertyValue_read", skip_all)]
-    fn read<R: Read + Seek>(
-        reader: &mut Context<R>,
-        t: &PropertyTagDataFull,
-    ) -> Result<PropertyValue> {
+    fn read<A: ArchiveReader>(ar: &mut A, t: &PropertyTagDataFull) -> Result<PropertyValue> {
         Ok(match t {
             PropertyTagDataFull::Array(_) => unreachable!(),
             PropertyTagDataFull::Struct { struct_type, .. } => {
-                PropertyValue::Struct(StructValue::read(reader, struct_type)?)
+                PropertyValue::Struct(StructValue::read(ar, struct_type)?)
             }
             PropertyTagDataFull::Set { .. } => unreachable!(),
             PropertyTagDataFull::Map { .. } => unreachable!(),
-            PropertyTagDataFull::Byte(_) => PropertyValue::Byte(Byte::Label(read_string(reader)?)),
-            PropertyTagDataFull::Enum(_, _) => PropertyValue::Enum(read_string(reader)?),
-            PropertyTagDataFull::Bool(_) => PropertyValue::Bool(reader.read_u8()? > 0),
+            PropertyTagDataFull::Byte(_) => PropertyValue::Byte(Byte::Label(read_string(ar)?)),
+            PropertyTagDataFull::Enum(_, _) => PropertyValue::Enum(read_string(ar)?),
+            PropertyTagDataFull::Bool(_) => PropertyValue::Bool(ar.read_u8()? > 0),
             PropertyTagDataFull::Other(property_type) => match property_type {
-                PropertyType::IntProperty => PropertyValue::Int(reader.read_i32::<LE>()?),
-                PropertyType::Int8Property => PropertyValue::Int8(reader.read_i8()?),
-                PropertyType::Int16Property => PropertyValue::Int16(reader.read_i16::<LE>()?),
-                PropertyType::Int64Property => PropertyValue::Int64(reader.read_i64::<LE>()?),
-                PropertyType::UInt16Property => PropertyValue::UInt16(reader.read_u16::<LE>()?),
-                PropertyType::UInt32Property => PropertyValue::UInt32(reader.read_u32::<LE>()?),
-                PropertyType::FloatProperty => {
-                    PropertyValue::Float(reader.read_f32::<LE>()?.into())
-                }
-                PropertyType::DoubleProperty => {
-                    PropertyValue::Double(reader.read_f64::<LE>()?.into())
-                }
-                PropertyType::NameProperty => PropertyValue::Name(read_string(reader)?),
-                PropertyType::StrProperty => PropertyValue::Str(read_string(reader)?),
+                PropertyType::IntProperty => PropertyValue::Int(ar.read_i32::<LE>()?),
+                PropertyType::Int8Property => PropertyValue::Int8(ar.read_i8()?),
+                PropertyType::Int16Property => PropertyValue::Int16(ar.read_i16::<LE>()?),
+                PropertyType::Int64Property => PropertyValue::Int64(ar.read_i64::<LE>()?),
+                PropertyType::UInt16Property => PropertyValue::UInt16(ar.read_u16::<LE>()?),
+                PropertyType::UInt32Property => PropertyValue::UInt32(ar.read_u32::<LE>()?),
+                PropertyType::FloatProperty => PropertyValue::Float(ar.read_f32::<LE>()?.into()),
+                PropertyType::DoubleProperty => PropertyValue::Double(ar.read_f64::<LE>()?.into()),
+                PropertyType::NameProperty => PropertyValue::Name(read_string(ar)?),
+                PropertyType::StrProperty => PropertyValue::Str(read_string(ar)?),
                 PropertyType::SoftObjectProperty => {
-                    PropertyValue::SoftObject(SoftObjectPath::read(reader)?)
+                    PropertyValue::SoftObject(SoftObjectPath::read(ar)?)
                 }
-                PropertyType::ObjectProperty => PropertyValue::Object(read_string(reader)?),
+                PropertyType::ObjectProperty => PropertyValue::Object(read_string(ar)?),
                 _ => return Err(Error::Other(format!("unimplemented property {t:?}"))),
             },
         })
     }
-    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
+    fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
         match &self {
-            PropertyValue::Int(v) => writer.write_i32::<LE>(*v)?,
-            PropertyValue::Int8(v) => writer.write_i8(*v)?,
-            PropertyValue::Int16(v) => writer.write_i16::<LE>(*v)?,
-            PropertyValue::Int64(v) => writer.write_i64::<LE>(*v)?,
-            PropertyValue::UInt16(v) => writer.write_u16::<LE>(*v)?,
-            PropertyValue::UInt32(v) => writer.write_u32::<LE>(*v)?,
-            PropertyValue::Float(v) => writer.write_f32::<LE>((*v).into())?,
-            PropertyValue::Double(v) => writer.write_f64::<LE>((*v).into())?,
-            PropertyValue::Bool(v) => writer.write_u8(u8::from(*v))?,
-            PropertyValue::Name(v) => write_string(writer, v)?,
-            PropertyValue::Str(v) => write_string(writer, v)?,
-            PropertyValue::SoftObject(v) => v.write(writer)?,
-            PropertyValue::SoftObjectPath(v) => v.write(writer)?,
-            PropertyValue::Object(v) => write_string(writer, v)?,
+            PropertyValue::Int(v) => ar.write_i32::<LE>(*v)?,
+            PropertyValue::Int8(v) => ar.write_i8(*v)?,
+            PropertyValue::Int16(v) => ar.write_i16::<LE>(*v)?,
+            PropertyValue::Int64(v) => ar.write_i64::<LE>(*v)?,
+            PropertyValue::UInt16(v) => ar.write_u16::<LE>(*v)?,
+            PropertyValue::UInt32(v) => ar.write_u32::<LE>(*v)?,
+            PropertyValue::Float(v) => ar.write_f32::<LE>((*v).into())?,
+            PropertyValue::Double(v) => ar.write_f64::<LE>((*v).into())?,
+            PropertyValue::Bool(v) => ar.write_u8(u8::from(*v))?,
+            PropertyValue::Name(v) => write_string(ar, v)?,
+            PropertyValue::Str(v) => write_string(ar, v)?,
+            PropertyValue::SoftObject(v) => v.write(ar)?,
+            PropertyValue::SoftObjectPath(v) => v.write(ar)?,
+            PropertyValue::Object(v) => write_string(ar, v)?,
             PropertyValue::Byte(v) => match v {
-                Byte::Byte(b) => writer.write_u8(*b)?,
-                Byte::Label(l) => write_string(writer, l)?,
+                Byte::Byte(b) => ar.write_u8(*b)?,
+                Byte::Label(l) => write_string(ar, l)?,
             },
-            PropertyValue::Enum(v) => write_string(writer, v)?,
-            PropertyValue::Struct(v) => v.write(writer)?,
+            PropertyValue::Enum(v) => write_string(ar, v)?,
+            PropertyValue::Struct(v) => v.write(ar)?,
         };
         Ok(())
     }
 }
 impl StructValue {
     #[instrument(name = "StructValue_read", skip_all)]
-    fn read<R: Read + Seek>(reader: &mut Context<R>, t: &StructType) -> Result<StructValue> {
+    fn read<A: ArchiveReader>(ar: &mut A, t: &StructType) -> Result<StructValue> {
         Ok(match t {
-            StructType::Guid => StructValue::Guid(FGuid::read(reader)?),
-            StructType::DateTime => StructValue::DateTime(reader.read_u64::<LE>()?),
-            StructType::Timespan => StructValue::Timespan(reader.read_i64::<LE>()?),
-            StructType::Vector2D => StructValue::Vector2D(Vector2D::read(reader)?),
-            StructType::Vector => StructValue::Vector(Vector::read(reader)?),
-            StructType::IntVector => StructValue::IntVector(IntVector::read(reader)?),
-            StructType::Box => StructValue::Box(Box::read(reader)?),
-            StructType::IntPoint => StructValue::IntPoint(IntPoint::read(reader)?),
-            StructType::Quat => StructValue::Quat(Quat::read(reader)?),
-            StructType::LinearColor => StructValue::LinearColor(LinearColor::read(reader)?),
-            StructType::Color => StructValue::Color(Color::read(reader)?),
-            StructType::Rotator => StructValue::Rotator(Rotator::read(reader)?),
-            StructType::SoftObjectPath => {
-                StructValue::SoftObjectPath(SoftObjectPath::read(reader)?)
-            }
+            StructType::Guid => StructValue::Guid(FGuid::read(ar)?),
+            StructType::DateTime => StructValue::DateTime(ar.read_u64::<LE>()?),
+            StructType::Timespan => StructValue::Timespan(ar.read_i64::<LE>()?),
+            StructType::Vector2D => StructValue::Vector2D(Vector2D::read(ar)?),
+            StructType::Vector => StructValue::Vector(Vector::read(ar)?),
+            StructType::IntVector => StructValue::IntVector(IntVector::read(ar)?),
+            StructType::Box => StructValue::Box(Box::read(ar)?),
+            StructType::IntPoint => StructValue::IntPoint(IntPoint::read(ar)?),
+            StructType::Quat => StructValue::Quat(Quat::read(ar)?),
+            StructType::LinearColor => StructValue::LinearColor(LinearColor::read(ar)?),
+            StructType::Color => StructValue::Color(Color::read(ar)?),
+            StructType::Rotator => StructValue::Rotator(Rotator::read(ar)?),
+            StructType::SoftObjectPath => StructValue::SoftObjectPath(SoftObjectPath::read(ar)?),
             StructType::GameplayTagContainer => {
-                StructValue::GameplayTagContainer(GameplayTagContainer::read(reader)?)
+                StructValue::GameplayTagContainer(GameplayTagContainer::read(ar)?)
             }
-            StructType::UniqueNetIdRepl => {
-                StructValue::UniqueNetIdRepl(UniqueNetIdRepl::read(reader)?)
-            }
+            StructType::UniqueNetIdRepl => StructValue::UniqueNetIdRepl(UniqueNetIdRepl::read(ar)?),
             StructType::Raw(_) => unreachable!("should be handled at property level"),
-            StructType::Struct(_) => StructValue::Struct(read_properties_until_none(reader)?),
+            StructType::Struct(_) => StructValue::Struct(read_properties_until_none(ar)?),
         })
     }
-    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
+    fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
         match self {
-            StructValue::Guid(v) => v.write(writer)?,
-            StructValue::DateTime(v) => writer.write_u64::<LE>(*v)?,
-            StructValue::Timespan(v) => writer.write_i64::<LE>(*v)?,
-            StructValue::Vector2D(v) => v.write(writer)?,
-            StructValue::Vector(v) => v.write(writer)?,
-            StructValue::IntVector(v) => v.write(writer)?,
-            StructValue::Box(v) => v.write(writer)?,
-            StructValue::IntPoint(v) => v.write(writer)?,
-            StructValue::Quat(v) => v.write(writer)?,
-            StructValue::LinearColor(v) => v.write(writer)?,
-            StructValue::Color(v) => v.write(writer)?,
-            StructValue::Rotator(v) => v.write(writer)?,
-            StructValue::SoftObjectPath(v) => v.write(writer)?,
-            StructValue::GameplayTagContainer(v) => v.write(writer)?,
-            StructValue::UniqueNetIdRepl(v) => v.write(writer)?,
-            StructValue::Raw(v) => writer.write_all(v)?,
-            StructValue::Struct(v) => write_properties_none_terminated(writer, v)?,
+            StructValue::Guid(v) => v.write(ar)?,
+            StructValue::DateTime(v) => ar.write_u64::<LE>(*v)?,
+            StructValue::Timespan(v) => ar.write_i64::<LE>(*v)?,
+            StructValue::Vector2D(v) => v.write(ar)?,
+            StructValue::Vector(v) => v.write(ar)?,
+            StructValue::IntVector(v) => v.write(ar)?,
+            StructValue::Box(v) => v.write(ar)?,
+            StructValue::IntPoint(v) => v.write(ar)?,
+            StructValue::Quat(v) => v.write(ar)?,
+            StructValue::LinearColor(v) => v.write(ar)?,
+            StructValue::Color(v) => v.write(ar)?,
+            StructValue::Rotator(v) => v.write(ar)?,
+            StructValue::SoftObjectPath(v) => v.write(ar)?,
+            StructValue::GameplayTagContainer(v) => v.write(ar)?,
+            StructValue::UniqueNetIdRepl(v) => v.write(ar)?,
+            StructValue::Raw(v) => ar.write_all(v)?,
+            StructValue::Struct(v) => write_properties_none_terminated(ar, v)?,
         }
         Ok(())
     }
 }
 impl ValueVec {
     #[instrument(name = "ValueVec_read", skip_all)]
-    fn read<R: Read + Seek>(
-        reader: &mut Context<R>,
+    fn read<A: ArchiveReader>(
+        ar: &mut A,
         t: &PropertyType,
         size: u32,
         count: u32,
     ) -> Result<ValueVec> {
         Ok(match t {
             PropertyType::IntProperty => {
-                ValueVec::Int(read_array(count, reader, |r| Ok(r.read_i32::<LE>()?))?)
+                ValueVec::Int(read_array(count, ar, |r| Ok(r.read_i32::<LE>()?))?)
             }
             PropertyType::Int16Property => {
-                ValueVec::Int16(read_array(count, reader, |r| Ok(r.read_i16::<LE>()?))?)
+                ValueVec::Int16(read_array(count, ar, |r| Ok(r.read_i16::<LE>()?))?)
             }
             PropertyType::Int64Property => {
-                ValueVec::Int64(read_array(count, reader, |r| Ok(r.read_i64::<LE>()?))?)
+                ValueVec::Int64(read_array(count, ar, |r| Ok(r.read_i64::<LE>()?))?)
             }
             PropertyType::UInt16Property => {
-                ValueVec::UInt16(read_array(count, reader, |r| Ok(r.read_u16::<LE>()?))?)
+                ValueVec::UInt16(read_array(count, ar, |r| Ok(r.read_u16::<LE>()?))?)
             }
             PropertyType::UInt32Property => {
-                ValueVec::UInt32(read_array(count, reader, |r| Ok(r.read_u32::<LE>()?))?)
+                ValueVec::UInt32(read_array(count, ar, |r| Ok(r.read_u32::<LE>()?))?)
             }
-            PropertyType::FloatProperty => ValueVec::Float(read_array(count, reader, |r| {
-                Ok(r.read_f32::<LE>()?.into())
-            })?),
-            PropertyType::DoubleProperty => ValueVec::Double(read_array(count, reader, |r| {
-                Ok(r.read_f64::<LE>()?.into())
-            })?),
+            PropertyType::FloatProperty => {
+                ValueVec::Float(read_array(count, ar, |r| Ok(r.read_f32::<LE>()?.into()))?)
+            }
+            PropertyType::DoubleProperty => {
+                ValueVec::Double(read_array(count, ar, |r| Ok(r.read_f64::<LE>()?.into()))?)
+            }
             PropertyType::BoolProperty => {
-                ValueVec::Bool(read_array(count, reader, |r| Ok(r.read_u8()? > 0))?)
+                ValueVec::Bool(read_array(count, ar, |r| Ok(r.read_u8()? > 0))?)
             }
             PropertyType::ByteProperty => {
                 if size == count {
-                    ValueVec::Byte(ByteArray::Byte(read_array(count, reader, |r| {
-                        Ok(r.read_u8()?)
-                    })?))
+                    ValueVec::Byte(ByteArray::Byte(read_array(
+                        count,
+                        ar,
+                        |r| Ok(r.read_u8()?),
+                    )?))
                 } else {
-                    ValueVec::Byte(ByteArray::Label(read_array(count, reader, |r| {
-                        read_string(r)
-                    })?))
+                    ValueVec::Byte(ByteArray::Label(read_array(count, ar, |r| read_string(r))?))
                 }
             }
-            PropertyType::EnumProperty => ValueVec::Enum(read_array(count, reader, read_string)?),
-            PropertyType::StrProperty => ValueVec::Str(read_array(count, reader, read_string)?),
-            PropertyType::TextProperty => ValueVec::Text(read_array(count, reader, Text::read)?),
-            PropertyType::SoftObjectProperty => {
-                ValueVec::SoftObject(read_array(count, reader, |r| {
-                    Ok((read_string(r)?, read_string(r)?))
-                })?)
-            }
-            PropertyType::NameProperty => ValueVec::Name(read_array(count, reader, read_string)?),
-            PropertyType::ObjectProperty => {
-                ValueVec::Object(read_array(count, reader, read_string)?)
-            }
+            PropertyType::EnumProperty => ValueVec::Enum(read_array(count, ar, read_string)?),
+            PropertyType::StrProperty => ValueVec::Str(read_array(count, ar, read_string)?),
+            PropertyType::TextProperty => ValueVec::Text(read_array(count, ar, Text::read)?),
+            PropertyType::SoftObjectProperty => ValueVec::SoftObject(read_array(count, ar, |r| {
+                Ok((read_string(r)?, read_string(r)?))
+            })?),
+            PropertyType::NameProperty => ValueVec::Name(read_array(count, ar, read_string)?),
+            PropertyType::ObjectProperty => ValueVec::Object(read_array(count, ar, read_string)?),
             _ => return Err(Error::UnknownVecType(format!("{t:?}"))),
         })
     }
-    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
+    fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
         match &self {
             ValueVec::Int8(v) => {
-                writer.write_u32::<LE>(v.len() as u32)?;
+                ar.write_u32::<LE>(v.len() as u32)?;
                 for i in v {
-                    writer.write_i8(*i)?;
+                    ar.write_i8(*i)?;
                 }
             }
             ValueVec::Int16(v) => {
-                writer.write_u32::<LE>(v.len() as u32)?;
+                ar.write_u32::<LE>(v.len() as u32)?;
                 for i in v {
-                    writer.write_i16::<LE>(*i)?;
+                    ar.write_i16::<LE>(*i)?;
                 }
             }
             ValueVec::Int(v) => {
-                writer.write_u32::<LE>(v.len() as u32)?;
+                ar.write_u32::<LE>(v.len() as u32)?;
                 for i in v {
-                    writer.write_i32::<LE>(*i)?;
+                    ar.write_i32::<LE>(*i)?;
                 }
             }
             ValueVec::Int64(v) => {
-                writer.write_u32::<LE>(v.len() as u32)?;
+                ar.write_u32::<LE>(v.len() as u32)?;
                 for i in v {
-                    writer.write_i64::<LE>(*i)?;
+                    ar.write_i64::<LE>(*i)?;
                 }
             }
             ValueVec::UInt8(v) => {
-                writer.write_u32::<LE>(v.len() as u32)?;
+                ar.write_u32::<LE>(v.len() as u32)?;
                 for i in v {
-                    writer.write_u8(*i)?;
+                    ar.write_u8(*i)?;
                 }
             }
             ValueVec::UInt16(v) => {
-                writer.write_u32::<LE>(v.len() as u32)?;
+                ar.write_u32::<LE>(v.len() as u32)?;
                 for i in v {
-                    writer.write_u16::<LE>(*i)?;
+                    ar.write_u16::<LE>(*i)?;
                 }
             }
             ValueVec::UInt32(v) => {
-                writer.write_u32::<LE>(v.len() as u32)?;
+                ar.write_u32::<LE>(v.len() as u32)?;
                 for i in v {
-                    writer.write_u32::<LE>(*i)?;
+                    ar.write_u32::<LE>(*i)?;
                 }
             }
             ValueVec::UInt64(v) => {
-                writer.write_u32::<LE>(v.len() as u32)?;
+                ar.write_u32::<LE>(v.len() as u32)?;
                 for i in v {
-                    writer.write_u64::<LE>(*i)?;
+                    ar.write_u64::<LE>(*i)?;
                 }
             }
             ValueVec::Float(v) => {
-                writer.write_u32::<LE>(v.len() as u32)?;
+                ar.write_u32::<LE>(v.len() as u32)?;
                 for i in v {
-                    writer.write_f32::<LE>((*i).into())?;
+                    ar.write_f32::<LE>((*i).into())?;
                 }
             }
             ValueVec::Double(v) => {
-                writer.write_u32::<LE>(v.len() as u32)?;
+                ar.write_u32::<LE>(v.len() as u32)?;
                 for i in v {
-                    writer.write_f64::<LE>((*i).into())?;
+                    ar.write_f64::<LE>((*i).into())?;
                 }
             }
             ValueVec::Bool(v) => {
-                writer.write_u32::<LE>(v.len() as u32)?;
+                ar.write_u32::<LE>(v.len() as u32)?;
                 for b in v {
-                    writer.write_u8(*b as u8)?;
+                    ar.write_u8(*b as u8)?;
                 }
             }
             ValueVec::Byte(v) => match v {
                 ByteArray::Byte(b) => {
-                    writer.write_u32::<LE>(b.len() as u32)?;
+                    ar.write_u32::<LE>(b.len() as u32)?;
                     for b in b {
-                        writer.write_u8(*b)?;
+                        ar.write_u8(*b)?;
                     }
                 }
                 ByteArray::Label(l) => {
-                    writer.write_u32::<LE>(l.len() as u32)?;
+                    ar.write_u32::<LE>(l.len() as u32)?;
                     for l in l {
-                        write_string(writer, l)?;
+                        write_string(ar, l)?;
                     }
                 }
             },
             ValueVec::Enum(v) => {
-                writer.write_u32::<LE>(v.len() as u32)?;
+                ar.write_u32::<LE>(v.len() as u32)?;
                 for i in v {
-                    write_string(writer, i)?;
+                    write_string(ar, i)?;
                 }
             }
             ValueVec::Str(v) | ValueVec::Object(v) | ValueVec::Name(v) => {
-                writer.write_u32::<LE>(v.len() as u32)?;
+                ar.write_u32::<LE>(v.len() as u32)?;
                 for i in v {
-                    write_string(writer, i)?;
+                    write_string(ar, i)?;
                 }
             }
             ValueVec::Text(v) => {
-                writer.write_u32::<LE>(v.len() as u32)?;
+                ar.write_u32::<LE>(v.len() as u32)?;
                 for i in v {
-                    i.write(writer)?;
+                    i.write(ar)?;
                 }
             }
             ValueVec::SoftObject(v) => {
-                writer.write_u32::<LE>(v.len() as u32)?;
+                ar.write_u32::<LE>(v.len() as u32)?;
                 for (a, b) in v {
-                    write_string(writer, a)?;
-                    write_string(writer, b)?;
+                    write_string(ar, a)?;
+                    write_string(ar, b)?;
                 }
             }
             ValueVec::Box(v) => {
-                writer.write_u32::<LE>(v.len() as u32)?;
+                ar.write_u32::<LE>(v.len() as u32)?;
                 for i in v {
-                    i.write(writer)?;
+                    i.write(ar)?;
                 }
             }
         }
@@ -2813,17 +2784,17 @@ impl ValueVec {
 }
 impl ValueArray {
     #[instrument(name = "ValueArray_read", skip_all)]
-    fn read<R: Read + Seek>(
-        reader: &mut Context<R>,
+    fn read<A: ArchiveReader>(
+        ar: &mut A,
         tag: PropertyTagDataFull,
         size: u32,
     ) -> Result<ValueArray> {
-        let count = reader.read_u32::<LE>()?;
+        let count = ar.read_u32::<LE>()?;
         Ok(match tag {
             PropertyTagDataFull::Struct { struct_type, id } => {
-                let (struct_type, id) = if !reader.version().property_tag() {
-                    if reader.version().array_inner_tag() {
-                        let tag = PropertyTagFull::read(reader)?.unwrap();
+                let (struct_type, id) = if !ar.version().property_tag() {
+                    if ar.version().array_inner_tag() {
+                        let tag = PropertyTagFull::read(ar)?.unwrap();
                         match tag.data {
                             PropertyTagDataFull::Struct { struct_type, id } => (struct_type, id),
                             _ => {
@@ -2843,7 +2814,7 @@ impl ValueArray {
 
                 let mut value = vec![];
                 for _ in 0..count {
-                    value.push(StructValue::read(reader, &struct_type)?);
+                    value.push(StructValue::read(ar, &struct_type)?);
                 }
                 ValueArray::Struct {
                     type_: PropertyType::StructProperty,
@@ -2852,10 +2823,10 @@ impl ValueArray {
                     value,
                 }
             }
-            _ => ValueArray::Base(ValueVec::read(reader, &tag.basic_type(), size, count)?),
+            _ => ValueArray::Base(ValueVec::read(ar, &tag.basic_type(), size, count)?),
         })
     }
-    fn write<W: Write + Seek>(&self, writer: &mut Context<W>, tag: &PropertyTagFull) -> Result<()> {
+    fn write<A: ArchiveWriter>(&self, ar: &mut A, tag: &PropertyTagFull) -> Result<()> {
         match &self {
             ValueArray::Struct {
                 type_,
@@ -2863,42 +2834,42 @@ impl ValueArray {
                 id,
                 value,
             } => {
-                writer.write_u32::<LE>(value.len() as u32)?;
+                ar.write_u32::<LE>(value.len() as u32)?;
 
-                if !writer.version().property_tag() && writer.version().array_inner_tag() {
-                    write_string(writer, &tag.name)?;
-                    type_.write(writer)?;
+                if !ar.version().property_tag() && ar.version().array_inner_tag() {
+                    write_string(ar, &tag.name)?;
+                    type_.write(ar)?;
 
                     // Write placeholder size
-                    let size_pos = writer.stream_position()?;
-                    writer.write_u32::<LE>(0)?;
-                    writer.write_u32::<LE>(0)?;
-                    struct_type.write(writer)?;
+                    let size_pos = ar.stream_position()?;
+                    ar.write_u32::<LE>(0)?;
+                    ar.write_u32::<LE>(0)?;
+                    struct_type.write(ar)?;
                     if let Some(id) = id {
-                        id.write(writer)?;
+                        id.write(ar)?;
                     }
-                    writer.write_u8(0)?;
+                    ar.write_u8(0)?;
 
                     // Write data and measure size
-                    let data_start = writer.stream_position()?;
+                    let data_start = ar.stream_position()?;
                     for v in value {
-                        v.write(writer)?;
+                        v.write(ar)?;
                     }
-                    let data_end = writer.stream_position()?;
+                    let data_end = ar.stream_position()?;
                     let size = (data_end - data_start) as u32;
 
                     // Seek back and write actual size
-                    writer.seek(std::io::SeekFrom::Start(size_pos))?;
-                    writer.write_u32::<LE>(size)?;
-                    writer.seek(std::io::SeekFrom::Start(data_end))?;
+                    ar.seek(std::io::SeekFrom::Start(size_pos))?;
+                    ar.write_u32::<LE>(size)?;
+                    ar.seek(std::io::SeekFrom::Start(data_end))?;
                 } else {
                     for v in value {
-                        v.write(writer)?;
+                        v.write(ar)?;
                     }
                 }
             }
             ValueArray::Base(vec) => {
-                vec.write(writer)?;
+                vec.write(ar)?;
             }
         }
         Ok(())
@@ -2906,31 +2877,27 @@ impl ValueArray {
 }
 impl ValueSet {
     #[instrument(name = "ValueSet_read", skip_all)]
-    fn read<R: Read + Seek>(
-        reader: &mut Context<R>,
-        t: &PropertyTagDataFull,
-        size: u32,
-    ) -> Result<ValueSet> {
-        let count = reader.read_u32::<LE>()?;
+    fn read<A: ArchiveReader>(ar: &mut A, t: &PropertyTagDataFull, size: u32) -> Result<ValueSet> {
+        let count = ar.read_u32::<LE>()?;
         Ok(match t {
             PropertyTagDataFull::Struct { struct_type, .. } => {
-                ValueSet::Struct(read_array(count, reader, |r| {
+                ValueSet::Struct(read_array(count, ar, |r| {
                     StructValue::read(r, struct_type)
                 })?)
             }
-            _ => ValueSet::Base(ValueVec::read(reader, &t.basic_type(), size, count)?),
+            _ => ValueSet::Base(ValueVec::read(ar, &t.basic_type(), size, count)?),
         })
     }
-    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
+    fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
         match &self {
             ValueSet::Struct(value) => {
-                writer.write_u32::<LE>(value.len() as u32)?;
+                ar.write_u32::<LE>(value.len() as u32)?;
                 for v in value {
-                    v.write(writer)?;
+                    v.write(ar)?;
                 }
             }
             ValueSet::Base(vec) => {
-                vec.write(writer)?;
+                vec.write(ar)?;
             }
         }
         Ok(())
@@ -2981,29 +2948,29 @@ pub enum PropertyInner {
 
 impl Property {
     #[instrument(name = "Property_read", skip_all)]
-    fn read<R: Read + Seek>(reader: &mut Context<R>, tag: PropertyTagFull) -> Result<Property> {
+    fn read<A: ArchiveReader>(ar: &mut A, tag: PropertyTagFull) -> Result<Property> {
         if tag.data.has_raw_struct() {
             let mut raw = vec![0; tag.size as usize];
-            reader.read_exact(&mut raw)?;
+            ar.read_exact(&mut raw)?;
             return Ok(Property {
                 tag: tag.into_partial(),
                 inner: PropertyInner::Raw(raw),
             });
         }
         // Save the current position before attempting to parse
-        let start_position = reader.stream_position()?;
+        let start_position = ar.stream_position()?;
 
         // Try to parse the property directly from the stream
-        let inner = match Self::try_read_inner(reader, &tag) {
+        let inner = match Self::try_read_inner(ar, &tag) {
             Ok(inner) => inner,
             Err(e) => {
                 // Parsing failed, seek back to start and read raw data
-                if reader.log() {
+                if ar.log() {
                     eprintln!("Warning: Failed to parse property '{}': {}", tag.name, e);
                 }
-                reader.seek(std::io::SeekFrom::Start(start_position))?;
+                ar.seek(std::io::SeekFrom::Start(start_position))?;
                 let mut property_data = vec![0u8; tag.size as usize];
-                reader.read_exact(&mut property_data)?;
+                ar.read_exact(&mut property_data)?;
                 PropertyInner::Raw(property_data)
             }
         };
@@ -3014,44 +2981,44 @@ impl Property {
         })
     }
 
-    fn try_read_inner<R: Read + Seek>(
-        reader: &mut Context<R>,
+    fn try_read_inner<A: ArchiveReader>(
+        ar: &mut A,
         tag: &PropertyTagFull,
     ) -> Result<PropertyInner> {
         Ok(match &tag.data {
             PropertyTagDataFull::Bool(value) => PropertyInner::Bool(*value),
             PropertyTagDataFull::Byte(ref enum_type) => {
                 let value = if enum_type.is_none() {
-                    Byte::Byte(reader.read_u8()?)
+                    Byte::Byte(ar.read_u8()?)
                 } else {
-                    Byte::Label(read_string(reader)?)
+                    Byte::Label(read_string(ar)?)
                 };
                 PropertyInner::Byte(value)
             }
-            PropertyTagDataFull::Enum { .. } => PropertyInner::Enum(read_string(reader)?),
+            PropertyTagDataFull::Enum { .. } => PropertyInner::Enum(read_string(ar)?),
             PropertyTagDataFull::Set { key_type } => {
-                reader.read_u32::<LE>()?;
-                PropertyInner::Set(ValueSet::read(reader, key_type, tag.size - 8)?)
+                ar.read_u32::<LE>()?;
+                PropertyInner::Set(ValueSet::read(ar, key_type, tag.size - 8)?)
             }
             PropertyTagDataFull::Map {
                 key_type,
                 value_type,
             } => {
-                reader.read_u32::<LE>()?;
-                let count = reader.read_u32::<LE>()?;
+                ar.read_u32::<LE>()?;
+                let count = ar.read_u32::<LE>()?;
                 let mut value = vec![];
 
                 for _ in 0..count {
-                    value.push(MapEntry::read(reader, key_type, value_type)?)
+                    value.push(MapEntry::read(ar, key_type, value_type)?)
                 }
 
                 PropertyInner::Map(value)
             }
             PropertyTagDataFull::Struct { struct_type, .. } => {
-                PropertyInner::Struct(StructValue::read(reader, struct_type)?)
+                PropertyInner::Struct(StructValue::read(ar, struct_type)?)
             }
             PropertyTagDataFull::Array(data) => {
-                PropertyInner::Array(ValueArray::read(reader, *data.clone(), tag.size - 4)?)
+                PropertyInner::Array(ValueArray::read(ar, *data.clone(), tag.size - 4)?)
             }
             PropertyTagDataFull::Other(t) => match t {
                 PropertyType::BoolProperty
@@ -3061,136 +3028,130 @@ impl Property {
                 | PropertyType::MapProperty
                 | PropertyType::StructProperty
                 | PropertyType::ArrayProperty => unreachable!(),
-                PropertyType::Int8Property => PropertyInner::Int8(reader.read_i8()?),
-                PropertyType::Int16Property => PropertyInner::Int16(reader.read_i16::<LE>()?),
-                PropertyType::IntProperty => PropertyInner::Int(reader.read_i32::<LE>()?),
-                PropertyType::Int64Property => PropertyInner::Int64(reader.read_i64::<LE>()?),
-                PropertyType::UInt8Property => PropertyInner::UInt8(reader.read_u8()?),
-                PropertyType::UInt16Property => PropertyInner::UInt16(reader.read_u16::<LE>()?),
-                PropertyType::UInt32Property => PropertyInner::UInt32(reader.read_u32::<LE>()?),
-                PropertyType::UInt64Property => PropertyInner::UInt64(reader.read_u64::<LE>()?),
-                PropertyType::FloatProperty => {
-                    PropertyInner::Float(reader.read_f32::<LE>()?.into())
-                }
-                PropertyType::DoubleProperty => {
-                    PropertyInner::Double(reader.read_f64::<LE>()?.into())
-                }
-                PropertyType::NameProperty => PropertyInner::Name(read_string(reader)?),
-                PropertyType::StrProperty => PropertyInner::Str(read_string(reader)?),
-                PropertyType::FieldPathProperty => {
-                    PropertyInner::FieldPath(FieldPath::read(reader)?)
-                }
+                PropertyType::Int8Property => PropertyInner::Int8(ar.read_i8()?),
+                PropertyType::Int16Property => PropertyInner::Int16(ar.read_i16::<LE>()?),
+                PropertyType::IntProperty => PropertyInner::Int(ar.read_i32::<LE>()?),
+                PropertyType::Int64Property => PropertyInner::Int64(ar.read_i64::<LE>()?),
+                PropertyType::UInt8Property => PropertyInner::UInt8(ar.read_u8()?),
+                PropertyType::UInt16Property => PropertyInner::UInt16(ar.read_u16::<LE>()?),
+                PropertyType::UInt32Property => PropertyInner::UInt32(ar.read_u32::<LE>()?),
+                PropertyType::UInt64Property => PropertyInner::UInt64(ar.read_u64::<LE>()?),
+                PropertyType::FloatProperty => PropertyInner::Float(ar.read_f32::<LE>()?.into()),
+                PropertyType::DoubleProperty => PropertyInner::Double(ar.read_f64::<LE>()?.into()),
+                PropertyType::NameProperty => PropertyInner::Name(read_string(ar)?),
+                PropertyType::StrProperty => PropertyInner::Str(read_string(ar)?),
+                PropertyType::FieldPathProperty => PropertyInner::FieldPath(FieldPath::read(ar)?),
                 PropertyType::SoftObjectProperty => {
-                    PropertyInner::SoftObject(SoftObjectPath::read(reader)?)
+                    PropertyInner::SoftObject(SoftObjectPath::read(ar)?)
                 }
-                PropertyType::ObjectProperty => PropertyInner::Object(read_string(reader)?),
-                PropertyType::TextProperty => PropertyInner::Text(Text::read(reader)?),
-                PropertyType::DelegateProperty => PropertyInner::Delegate(Delegate::read(reader)?),
+                PropertyType::ObjectProperty => PropertyInner::Object(read_string(ar)?),
+                PropertyType::TextProperty => PropertyInner::Text(Text::read(ar)?),
+                PropertyType::DelegateProperty => PropertyInner::Delegate(Delegate::read(ar)?),
                 PropertyType::MulticastDelegateProperty => {
-                    PropertyInner::MulticastDelegate(MulticastDelegate::read(reader)?)
+                    PropertyInner::MulticastDelegate(MulticastDelegate::read(ar)?)
                 }
                 PropertyType::MulticastInlineDelegateProperty => {
-                    PropertyInner::MulticastInlineDelegate(MulticastInlineDelegate::read(reader)?)
+                    PropertyInner::MulticastInlineDelegate(MulticastInlineDelegate::read(ar)?)
                 }
                 PropertyType::MulticastSparseDelegateProperty => {
-                    PropertyInner::MulticastSparseDelegate(MulticastSparseDelegate::read(reader)?)
+                    PropertyInner::MulticastSparseDelegate(MulticastSparseDelegate::read(ar)?)
                 }
             },
         })
     }
-    fn write<W: Write + Seek>(&self, writer: &mut Context<W>, tag: &PropertyTagFull) -> Result<()> {
+    fn write<A: ArchiveWriter>(&self, ar: &mut A, tag: &PropertyTagFull) -> Result<()> {
         match &self.inner {
             PropertyInner::Int8(value) => {
-                writer.write_i8(*value)?;
+                ar.write_i8(*value)?;
             }
             PropertyInner::Int16(value) => {
-                writer.write_i16::<LE>(*value)?;
+                ar.write_i16::<LE>(*value)?;
             }
             PropertyInner::Int(value) => {
-                writer.write_i32::<LE>(*value)?;
+                ar.write_i32::<LE>(*value)?;
             }
             PropertyInner::Int64(value) => {
-                writer.write_i64::<LE>(*value)?;
+                ar.write_i64::<LE>(*value)?;
             }
             PropertyInner::UInt8(value) => {
-                writer.write_u8(*value)?;
+                ar.write_u8(*value)?;
             }
             PropertyInner::UInt16(value) => {
-                writer.write_u16::<LE>(*value)?;
+                ar.write_u16::<LE>(*value)?;
             }
             PropertyInner::UInt32(value) => {
-                writer.write_u32::<LE>(*value)?;
+                ar.write_u32::<LE>(*value)?;
             }
             PropertyInner::UInt64(value) => {
-                writer.write_u64::<LE>(*value)?;
+                ar.write_u64::<LE>(*value)?;
             }
             PropertyInner::Float(value) => {
-                writer.write_f32::<LE>((*value).into())?;
+                ar.write_f32::<LE>((*value).into())?;
             }
             PropertyInner::Double(value) => {
-                writer.write_f64::<LE>((*value).into())?;
+                ar.write_f64::<LE>((*value).into())?;
             }
             PropertyInner::Bool(_) => {}
             PropertyInner::Byte(value) => match value {
                 Byte::Byte(b) => {
-                    writer.write_u8(*b)?;
+                    ar.write_u8(*b)?;
                 }
                 Byte::Label(l) => {
-                    write_string(writer, l)?;
+                    write_string(ar, l)?;
                 }
             },
             PropertyInner::Enum(value) => {
-                write_string(writer, value)?;
+                write_string(ar, value)?;
             }
             PropertyInner::Name(value) => {
-                write_string(writer, value)?;
+                write_string(ar, value)?;
             }
             PropertyInner::Str(value) => {
-                write_string(writer, value)?;
+                write_string(ar, value)?;
             }
             PropertyInner::FieldPath(value) => {
-                value.write(writer)?;
+                value.write(ar)?;
             }
             PropertyInner::SoftObject(value) => {
-                value.write(writer)?;
+                value.write(ar)?;
             }
             PropertyInner::Object(value) => {
-                write_string(writer, value)?;
+                write_string(ar, value)?;
             }
             PropertyInner::Text(value) => {
-                value.write(writer)?;
+                value.write(ar)?;
             }
             PropertyInner::Delegate(value) => {
-                value.write(writer)?;
+                value.write(ar)?;
             }
             PropertyInner::MulticastDelegate(value) => {
-                value.write(writer)?;
+                value.write(ar)?;
             }
             PropertyInner::MulticastInlineDelegate(value) => {
-                value.write(writer)?;
+                value.write(ar)?;
             }
             PropertyInner::MulticastSparseDelegate(value) => {
-                value.write(writer)?;
+                value.write(ar)?;
             }
             PropertyInner::Set(value) => {
-                writer.write_u32::<LE>(0)?;
-                value.write(writer)?;
+                ar.write_u32::<LE>(0)?;
+                value.write(ar)?;
             }
             PropertyInner::Map(value) => {
-                writer.write_u32::<LE>(0)?;
-                writer.write_u32::<LE>(value.len() as u32)?;
+                ar.write_u32::<LE>(0)?;
+                ar.write_u32::<LE>(value.len() as u32)?;
                 for v in value {
-                    v.write(writer)?;
+                    v.write(ar)?;
                 }
             }
             PropertyInner::Struct(value) => {
-                value.write(writer)?;
+                value.write(ar)?;
             }
             PropertyInner::Array(value) => {
-                value.write(writer, tag)?;
+                value.write(ar, tag)?;
             }
             PropertyInner::Raw(value) => {
-                writer.write_all(value)?;
+                ar.write_all(value)?;
             }
         }
         Ok(())
@@ -3204,17 +3165,17 @@ pub struct CustomFormatData {
 }
 impl CustomFormatData {
     #[instrument(name = "CustomFormatData_read", skip_all)]
-    fn read<R: Read + Seek>(reader: &mut Context<R>) -> Result<Self> {
+    fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
         Ok(CustomFormatData {
-            id: FGuid::read(reader)?,
-            value: reader.read_i32::<LE>()?,
+            id: FGuid::read(ar)?,
+            value: ar.read_i32::<LE>()?,
         })
     }
 }
 impl CustomFormatData {
-    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
-        self.id.write(writer)?;
-        writer.write_i32::<LE>(self.value)?;
+    fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
+        self.id.write(ar)?;
+        ar.write_i32::<LE>(self.value)?;
         Ok(())
     }
 }
@@ -3271,31 +3232,31 @@ impl VersionInfo for Header {
 }
 impl Header {
     #[instrument(name = "Header_read", skip_all)]
-    fn read<R: Read + Seek>(reader: &mut Context<R>) -> Result<Self> {
-        let magic = reader.read_u32::<LE>()?;
-        if reader.log() && magic != u32::from_le_bytes(*b"GVAS") {
+    fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
+        let magic = ar.read_u32::<LE>()?;
+        if ar.log() && magic != u32::from_le_bytes(*b"GVAS") {
             eprintln!(
                 "Found non-standard magic: {:02x?} ({}) expected: GVAS, continuing to parse...",
                 &magic.to_le_bytes(),
                 String::from_utf8_lossy(&magic.to_le_bytes())
             );
         }
-        let save_game_version = reader.read_u32::<LE>()?;
+        let save_game_version = ar.read_u32::<LE>()?;
         let package_version = PackageVersion {
-            ue4: reader.read_u32::<LE>()?,
+            ue4: ar.read_u32::<LE>()?,
             ue5: (save_game_version >= 3 && save_game_version != 34) // TODO 34 is probably a game specific version
-                .then(|| reader.read_u32::<LE>())
+                .then(|| ar.read_u32::<LE>())
                 .transpose()?,
         };
-        let engine_version_major = reader.read_u16::<LE>()?;
-        let engine_version_minor = reader.read_u16::<LE>()?;
-        let engine_version_patch = reader.read_u16::<LE>()?;
-        let engine_version_build = reader.read_u32::<LE>()?;
-        let engine_version = read_string(reader)?;
+        let engine_version_major = ar.read_u16::<LE>()?;
+        let engine_version_minor = ar.read_u16::<LE>()?;
+        let engine_version_patch = ar.read_u16::<LE>()?;
+        let engine_version_build = ar.read_u32::<LE>()?;
+        let engine_version = read_string(ar)?;
         let custom_version = if (engine_version_major, engine_version_minor) >= (4, 12) {
             Some((
-                reader.read_u32::<LE>()?,
-                read_array(reader.read_u32::<LE>()?, reader, CustomFormatData::read)?,
+                ar.read_u32::<LE>()?,
+                read_array(ar.read_u32::<LE>()?, ar, CustomFormatData::read)?,
             ))
         } else {
             None
@@ -3314,23 +3275,23 @@ impl Header {
     }
 }
 impl Header {
-    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
-        writer.write_u32::<LE>(self.magic)?;
-        writer.write_u32::<LE>(self.save_game_version)?;
-        writer.write_u32::<LE>(self.package_version.ue4)?;
+    fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
+        ar.write_u32::<LE>(self.magic)?;
+        ar.write_u32::<LE>(self.save_game_version)?;
+        ar.write_u32::<LE>(self.package_version.ue4)?;
         if let Some(ue5) = self.package_version.ue5 {
-            writer.write_u32::<LE>(ue5)?;
+            ar.write_u32::<LE>(ue5)?;
         }
-        writer.write_u16::<LE>(self.engine_version_major)?;
-        writer.write_u16::<LE>(self.engine_version_minor)?;
-        writer.write_u16::<LE>(self.engine_version_patch)?;
-        writer.write_u32::<LE>(self.engine_version_build)?;
-        write_string(writer, &self.engine_version)?;
+        ar.write_u16::<LE>(self.engine_version_major)?;
+        ar.write_u16::<LE>(self.engine_version_minor)?;
+        ar.write_u16::<LE>(self.engine_version_patch)?;
+        ar.write_u32::<LE>(self.engine_version_build)?;
+        write_string(ar, &self.engine_version)?;
         if let Some((custom_format_version, custom_format)) = &self.custom_version {
-            writer.write_u32::<LE>(*custom_format_version)?;
-            writer.write_u32::<LE>(custom_format.len() as u32)?;
+            ar.write_u32::<LE>(*custom_format_version)?;
+            ar.write_u32::<LE>(custom_format.len() as u32)?;
             for cf in custom_format {
-                cf.write(writer)?;
+                cf.write(ar)?;
             }
         }
         Ok(())
@@ -3345,23 +3306,23 @@ pub struct Root {
 }
 impl Root {
     #[instrument(name = "Root_read", skip_all)]
-    fn read<R: Read + Seek>(reader: &mut Context<R>) -> Result<Self> {
-        let save_game_type = read_string(reader)?;
-        if reader.version().property_tag() {
-            reader.read_u8()?;
+    fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
+        let save_game_type = read_string(ar)?;
+        if ar.version().property_tag() {
+            ar.read_u8()?;
         }
-        let properties = read_properties_until_none(reader)?;
+        let properties = read_properties_until_none(ar)?;
         Ok(Self {
             save_game_type,
             properties,
         })
     }
-    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
-        write_string(writer, &self.save_game_type)?;
-        if writer.version().property_tag() {
-            writer.write_u8(0)?;
+    fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
+        write_string(ar, &self.save_game_type)?;
+        if ar.version().property_tag() {
+            ar.write_u8(0)?;
         }
-        write_properties_none_terminated(writer, &self.properties)?;
+        write_properties_none_terminated(ar, &self.properties)?;
         Ok(())
     }
 }

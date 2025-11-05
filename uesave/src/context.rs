@@ -96,7 +96,7 @@ impl<S> Context<S> {
     }
     pub(crate) fn with_scope<F, T>(&mut self, name: &str, f: F) -> T
     where
-        F: FnOnce(&mut Context<S>) -> T,
+        F: FnOnce(&mut Self) -> T,
     {
         self.state.scope.push(name);
         let result = f(self);
