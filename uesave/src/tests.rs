@@ -5,30 +5,31 @@ use std::io::Cursor;
 
 const SAVE: &[u8] = include_bytes!("../drg-save-test.sav");
 
-struct MockVersionInfo;
-impl VersionInfo for MockVersionInfo {
-    fn large_world_coordinates(&self) -> bool {
-        false
-    }
-    fn property_tag(&self) -> bool {
-        false
-    }
-    fn property_guid(&self) -> bool {
-        true
-    }
-    fn array_inner_tag(&self) -> bool {
-        true
-    }
-    fn remove_asset_path_fnames(&self) -> bool {
-        false
+fn mock_header() -> Header {
+    Header {
+        magic: u32::from_le_bytes(*b"GVAS"),
+        save_game_version: 2,
+        package_version: PackageVersion {
+            ue4: 522,
+            ue5: None,
+        },
+        engine_version_major: 4,
+        engine_version_minor: 27,
+        engine_version_patch: 0,
+        engine_version_build: 0,
+        engine_version: String::from("4.27.0"),
+        custom_version: Some((3, vec![])),
     }
 }
 
 fn run<S, R, F>(s: &mut S, f: F) -> TResult<R>
 where
-    F: FnOnce(&mut Context<S, MockVersionInfo>) -> TResult<R>,
+    F: FnOnce(&mut Context<S>) -> TResult<R>,
 {
-    Context::run(s, |s| s.with_version(&MockVersionInfo, f))
+    Context::run(s, |s| {
+        s.set_version(mock_header());
+        f(s)
+    })
 }
 
 #[test]
