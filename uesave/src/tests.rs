@@ -115,18 +115,18 @@ fn test_header() -> TResult<()> {
 
 #[test]
 fn test_uuid() -> TResult<()> {
-    let id = uuid::uuid!("2eb5fdbd4d1001ac8ff33681daa59333");
+    let id = FGuid::parse_str("2eb5fdbd4d1001ac8ff33681daa59333")?;
     let mut writer = vec![];
     run(&mut writer, |writer| id.write(writer))?;
     let mut reader = Cursor::new(&writer);
-    let rid = run(&mut reader, uuid::Uuid::read)?;
+    let rid = run(&mut reader, FGuid::read)?;
     assert_eq!(id, rid);
     Ok(())
 }
 
 #[test]
 fn test_uuid2() -> TResult<()> {
-    let id = uuid::uuid!("85b20ca1-49fb-7138-a154-c89a2c20e2cd");
+    let id = FGuid::parse_str("85b20ca1-49fb-7138-a154-c89a2c20e2cd")?;
     let mut writer = vec![];
     run(&mut writer, |writer| id.write(writer))?;
     assert_eq!(
@@ -136,6 +136,14 @@ fn test_uuid2() -> TResult<()> {
             0x20, 0x2c
         ]
     );
+    Ok(())
+}
+
+#[test]
+fn test_uuid3() -> TResult<()> {
+    let s = "85b20ca1-49fb-7138-a154-c89a2c20e2cd";
+    let id = FGuid::parse_str(s)?;
+    assert_eq!(s, id.to_string());
     Ok(())
 }
 
@@ -204,7 +212,7 @@ fn test_read_struct_property() -> TResult<()> {
                     id: None,
                     data: PropertyTagDataPartial::Struct {
                         struct_type: StructType::Struct(Some("VanityMasterySave".to_string())),
-                        id: uuid::uuid!("00000000000000000000000000000000"),
+                        id: FGuid::nil(),
                     }
                 },
                 inner: PropertyInner::Struct(StructValue::Struct(Properties(

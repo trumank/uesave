@@ -46,15 +46,6 @@ use tracing::instrument;
 
 type TResult<T> = Result<T, Error>;
 
-trait Readable<R: Read + Seek, V> {
-    fn read(reader: &mut Context<R, V>) -> TResult<Self>
-    where
-        Self: Sized;
-}
-trait Writable<W, V> {
-    fn write(&self, writer: &mut Context<W, V>) -> TResult<()>;
-}
-
 struct SeekReader<R: Read> {
     inner: R,
     buffer: Vec<u8>,
@@ -190,19 +181,14 @@ impl<R: Read> Read for SeekReader<R> {
 }
 
 #[instrument(skip_all)]
-fn read_optional_uuid<R: Read + Seek, V>(
-    reader: &mut Context<R, V>,
-) -> TResult<Option<uuid::Uuid>> {
+fn read_optional_uuid<R: Read + Seek, V>(reader: &mut Context<R, V>) -> TResult<Option<FGuid>> {
     Ok(if reader.read_u8()? > 0 {
-        Some(uuid::Uuid::read(reader)?)
+        Some(FGuid::read(reader)?)
     } else {
         None
     })
 }
-fn write_optional_uuid<W: Write, V>(
-    writer: &mut Context<W, V>,
-    id: Option<uuid::Uuid>,
-) -> TResult<()> {
+fn write_optional_uuid<W: Write, V>(writer: &mut Context<W, V>, id: Option<FGuid>) -> TResult<()> {
     if let Some(id) = id {
         writer.write_u8(1)?;
         id.write(writer)?;
@@ -452,31 +438,113 @@ where
     (0..length).map(|_| f(reader)).collect()
 }
 
-#[rustfmt::skip]
-impl<R: Read + Seek, V> Readable<R, V> for uuid::Uuid {
-    #[instrument(name = "Uuid_read", skip_all)]
-    fn read(reader: &mut Context<R, V>) -> TResult<uuid::Uuid> {
-        let mut b = [0; 16];
-        reader.read_exact(&mut b)?;
-        Ok(uuid::Uuid::from_bytes([
-            b[0x3], b[0x2], b[0x1], b[0x0],
-            b[0x7], b[0x6], b[0x5], b[0x4],
-            b[0xb], b[0xa], b[0x9], b[0x8],
-            b[0xf], b[0xe], b[0xd], b[0xc],
-        ]))
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct FGuid {
+    a: u32,
+    b: u32,
+    c: u32,
+    d: u32,
+}
+
+impl FGuid {
+    pub fn new(a: u32, b: u32, c: u32, d: u32) -> Self {
+        Self { a, b, c, d }
+    }
+
+    pub fn nil() -> Self {
+        Self::default()
+    }
+
+    pub fn is_nil(&self) -> bool {
+        self.a == 0 && self.b == 0 && self.c == 0 && self.d == 0
+    }
+
+    pub fn parse_str(s: &str) -> Result<Self, Error> {
+        let s = s.replace("-", "");
+        if s.len() != 32 {
+            return Err(Error::Other("Invalid GUID string length".into()));
+        }
+
+        let parse_hex_u32 = |start: usize| -> Result<u32, Error> {
+            u32::from_str_radix(&s[start..start + 8], 16)
+                .map_err(|_| Error::Other("Invalid hex in GUID".into()))
+        };
+
+        Ok(Self {
+            a: parse_hex_u32(0)?,
+            b: parse_hex_u32(8)?,
+            c: parse_hex_u32(16)?,
+            d: parse_hex_u32(24)?,
+        })
     }
 }
-#[rustfmt::skip]
-impl<W: Write, V> Writable<W, V> for uuid::Uuid {
-    #[instrument(name = "Uuid_write", skip_all)]
-    fn write(&self, writer: &mut Context<W, V>) -> TResult<()> {
-        let b = self.as_bytes();
-        writer.write_all(&[
-            b[0x3], b[0x2], b[0x1], b[0x0],
-            b[0x7], b[0x6], b[0x5], b[0x4],
-            b[0xb], b[0xa], b[0x9], b[0x8],
-            b[0xf], b[0xe], b[0xd], b[0xc],
-        ])?;
+
+impl std::fmt::Display for FGuid {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let b = self.b.to_le_bytes();
+        let c = self.c.to_le_bytes();
+
+        write!(
+            f,
+            "{:08x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:08x}",
+            self.a, b[3], b[2], b[1], b[0], c[3], c[2], c[1], c[0], self.d,
+        )
+    }
+}
+
+impl Serialize for FGuid {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for FGuid {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct FGuidVisitor;
+
+        impl<'de> Visitor<'de> for FGuidVisitor {
+            type Value = FGuid;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a UUID string in format xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                FGuid::parse_str(value).map_err(|e| E::custom(format!("Invalid UUID: {}", e)))
+            }
+        }
+
+        deserializer.deserialize_str(FGuidVisitor)
+    }
+}
+
+impl FGuid {
+    #[instrument(name = "FGuid_read", skip_all)]
+    fn read<R: Read + Seek, V>(reader: &mut Context<R, V>) -> TResult<FGuid> {
+        Ok(Self {
+            a: reader.read_u32::<LE>()?,
+            b: reader.read_u32::<LE>()?,
+            c: reader.read_u32::<LE>()?,
+            d: reader.read_u32::<LE>()?,
+        })
+    }
+}
+impl FGuid {
+    #[instrument(name = "FGuid_write", skip_all)]
+    fn write<W: Write, V>(&self, writer: &mut Context<W, V>) -> TResult<()> {
+        writer.write_u32::<LE>(self.a)?;
+        writer.write_u32::<LE>(self.b)?;
+        writer.write_u32::<LE>(self.c)?;
+        writer.write_u32::<LE>(self.d)?;
         Ok(())
     }
 }
@@ -641,7 +709,7 @@ impl<'types, R: Read + Seek, V> Context<'_, '_, 'types, '_, R, V> {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct PropertyTagFull<'a> {
     name: Cow<'a, str>,
-    id: Option<uuid::Uuid>,
+    id: Option<FGuid>,
     size: u32,
     index: u32,
     data: PropertyTagDataFull,
@@ -651,7 +719,7 @@ enum PropertyTagDataFull {
     Array(std::boxed::Box<PropertyTagDataFull>),
     Struct {
         struct_type: StructType,
-        id: uuid::Uuid,
+        id: FGuid,
     },
     Set {
         key_type: std::boxed::Box<PropertyTagDataFull>,
@@ -668,7 +736,7 @@ enum PropertyTagDataFull {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PropertyTagPartial {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub id: Option<uuid::Uuid>,
+    pub id: Option<FGuid>,
     pub data: PropertyTagDataPartial,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -676,7 +744,7 @@ pub enum PropertyTagDataPartial {
     Array(std::boxed::Box<PropertyTagDataPartial>),
     Struct {
         struct_type: StructType,
-        id: uuid::Uuid,
+        id: FGuid,
     },
     Set {
         key_type: std::boxed::Box<PropertyTagDataPartial>,
@@ -855,7 +923,7 @@ impl PropertyTagFull<'_> {
                         let struct_type = StructType::from_full(&read_path(&node.inner[0])?, raw);
                         let id = match node.inner.len() {
                             1 => Default::default(),
-                            2 => uuid::Uuid::parse_str(&node.inner[1].name)?,
+                            2 => FGuid::parse_str(&node.inner[1].name)?,
                             _ => unimplemented!(),
                         };
                         PropertyTagDataFull::Struct { struct_type, id }
@@ -909,7 +977,7 @@ impl PropertyTagFull<'_> {
                 tag.index = reader.read_u32::<LE>()?;
             }
             if flags.contains(EPropertyTagFlags::HasPropertyGuid) {
-                tag.id = Some(uuid::Uuid::read(reader)?);
+                tag.id = Some(FGuid::read(reader)?);
             }
             if flags.contains(EPropertyTagFlags::HasPropertyExtensions) {
                 unimplemented!();
@@ -1014,7 +1082,7 @@ impl PropertyTagFull<'_> {
                     }
                     PropertyType::StructProperty => {
                         let struct_type = StructType::read(reader)?;
-                        let struct_id = uuid::Uuid::read(reader)?;
+                        let struct_id = FGuid::read(reader)?;
                         PropertyTagDataFull::Struct {
                             struct_type,
                             id: struct_id,
@@ -2178,17 +2246,17 @@ pub struct FFormatArgumentData {
     name: String,
     value: FFormatArgumentDataValue,
 }
-impl<R: Read + Seek, V> Readable<R, V> for FFormatArgumentData {
+impl FFormatArgumentData {
     #[instrument(name = "FFormatArgumentData_read", skip_all)]
-    fn read(reader: &mut Context<R, V>) -> TResult<Self> {
+    fn read<R: Read + Seek, V>(reader: &mut Context<R, V>) -> TResult<Self> {
         Ok(Self {
             name: read_string(reader)?,
             value: FFormatArgumentDataValue::read(reader)?,
         })
     }
 }
-impl<W: Write, V> Writable<W, V> for FFormatArgumentData {
-    fn write(&self, writer: &mut Context<W, V>) -> TResult<()> {
+impl FFormatArgumentData {
+    fn write<W: Write, V>(&self, writer: &mut Context<W, V>) -> TResult<()> {
         write_string(writer, &self.name)?;
         self.value.write(writer)?;
         Ok(())
@@ -2205,9 +2273,9 @@ pub enum FFormatArgumentDataValue {
     Text(std::boxed::Box<Text>),
     Gender(u64),
 }
-impl<R: Read + Seek, V> Readable<R, V> for FFormatArgumentDataValue {
+impl FFormatArgumentDataValue {
     #[instrument(name = "FFormatArgumentDataValue_read", skip_all)]
-    fn read(reader: &mut Context<R, V>) -> TResult<Self> {
+    fn read<R: Read + Seek, V>(reader: &mut Context<R, V>) -> TResult<Self> {
         let type_ = reader.read_u8()?;
         match type_ {
             0 => Ok(Self::Int(reader.read_i32::<LE>()?)),
@@ -2222,8 +2290,8 @@ impl<R: Read + Seek, V> Readable<R, V> for FFormatArgumentDataValue {
         }
     }
 }
-impl<W: Write, V> Writable<W, V> for FFormatArgumentDataValue {
-    fn write(&self, writer: &mut Context<W, V>) -> TResult<()> {
+impl FFormatArgumentDataValue {
+    fn write<W: Write, V>(&self, writer: &mut Context<W, V>) -> TResult<()> {
         match self {
             Self::Int(value) => {
                 writer.write_u8(0)?;
@@ -2264,9 +2332,9 @@ pub enum FFormatArgumentValue {
     Gender(u64),
 }
 
-impl<R: Read + Seek, V> Readable<R, V> for FFormatArgumentValue {
+impl FFormatArgumentValue {
     #[instrument(name = "FFormatArgumentValue_read", skip_all)]
-    fn read(reader: &mut Context<R, V>) -> TResult<Self> {
+    fn read<R: Read + Seek, V>(reader: &mut Context<R, V>) -> TResult<Self> {
         let type_ = reader.read_u8()?;
         match type_ {
             0 => Ok(Self::Int(reader.read_i64::<LE>()?)),
@@ -2281,8 +2349,8 @@ impl<R: Read + Seek, V> Readable<R, V> for FFormatArgumentValue {
         }
     }
 }
-impl<W: Write, V> Writable<W, V> for FFormatArgumentValue {
-    fn write(&self, writer: &mut Context<W, V>) -> TResult<()> {
+impl FFormatArgumentValue {
+    fn write<W: Write, V>(&self, writer: &mut Context<W, V>) -> TResult<()> {
         match self {
             Self::Int(value) => {
                 writer.write_u8(0)?;
@@ -2323,9 +2391,9 @@ pub struct FNumberFormattingOptions {
     minimum_fractional_digits: i32,
     maximum_fractional_digits: i32,
 }
-impl<R: Read + Seek, V> Readable<R, V> for FNumberFormattingOptions {
+impl FNumberFormattingOptions {
     #[instrument(name = "FNumberFormattingOptions_read", skip_all)]
-    fn read(reader: &mut Context<R, V>) -> TResult<Self> {
+    fn read<R: Read + Seek, V>(reader: &mut Context<R, V>) -> TResult<Self> {
         Ok(Self {
             always_sign: reader.read_u32::<LE>()? != 0,
             use_grouping: reader.read_u32::<LE>()? != 0,
@@ -2337,8 +2405,8 @@ impl<R: Read + Seek, V> Readable<R, V> for FNumberFormattingOptions {
         })
     }
 }
-impl<W: Write, V> Writable<W, V> for FNumberFormattingOptions {
-    fn write(&self, writer: &mut Context<W, V>) -> TResult<()> {
+impl FNumberFormattingOptions {
+    fn write<W: Write, V>(&self, writer: &mut Context<W, V>) -> TResult<()> {
         writer.write_u32::<LE>(self.always_sign as u32)?;
         writer.write_u32::<LE>(self.use_grouping as u32)?;
         writer.write_i8(self.rounding_mode)?;
@@ -2393,9 +2461,9 @@ pub enum TextVariant {
     },
 }
 
-impl<R: Read + Seek, V> Readable<R, V> for Text {
+impl Text {
     #[instrument(name = "Text_read", skip_all)]
-    fn read(reader: &mut Context<R, V>) -> TResult<Self> {
+    fn read<R: Read + Seek, V>(reader: &mut Context<R, V>) -> TResult<Self> {
         let flags = reader.read_u32::<LE>()?;
         let text_history_type = reader.read_i8()?;
         let variant = match text_history_type {
@@ -2440,8 +2508,8 @@ impl<R: Read + Seek, V> Readable<R, V> for Text {
         Ok(Self { flags, variant })
     }
 }
-impl<W: Write, V> Writable<W, V> for Text {
-    fn write(&self, writer: &mut Context<W, V>) -> TResult<()> {
+impl Text {
+    fn write<W: Write, V>(&self, writer: &mut Context<W, V>) -> TResult<()> {
         writer.write_u32::<LE>(self.flags)?;
         match &self.variant {
             TextVariant::None { culture_invariant } => {
@@ -2546,7 +2614,7 @@ pub enum PropertyValue {
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub enum StructValue {
-    Guid(uuid::Uuid),
+    Guid(FGuid),
     DateTime(DateTime),
     Timespan(Timespan),
     Vector2D(Vector2D),
@@ -2598,7 +2666,7 @@ pub enum ValueArray {
     Struct {
         type_: PropertyType,
         struct_type: StructType,
-        id: Option<uuid::Uuid>,
+        id: Option<FGuid>,
         value: Vec<StructValue>,
     },
 }
@@ -2681,7 +2749,7 @@ impl StructValue {
         t: &StructType,
     ) -> TResult<StructValue> {
         Ok(match t {
-            StructType::Guid => StructValue::Guid(uuid::Uuid::read(reader)?),
+            StructType::Guid => StructValue::Guid(FGuid::read(reader)?),
             StructType::DateTime => StructValue::DateTime(reader.read_u64::<LE>()?),
             StructType::Timespan => StructValue::Timespan(reader.read_i64::<LE>()?),
             StructType::Vector2D => StructValue::Vector2D(Vector2D::read(reader)?),
@@ -3347,20 +3415,20 @@ impl Property {
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CustomFormatData {
-    pub id: uuid::Uuid,
+    pub id: FGuid,
     pub value: i32,
 }
-impl<R: Read + Seek, V> Readable<R, V> for CustomFormatData {
+impl CustomFormatData {
     #[instrument(name = "CustomFormatData_read", skip_all)]
-    fn read(reader: &mut Context<R, V>) -> TResult<Self> {
+    fn read<R: Read + Seek, V>(reader: &mut Context<R, V>) -> TResult<Self> {
         Ok(CustomFormatData {
-            id: uuid::Uuid::read(reader)?,
+            id: FGuid::read(reader)?,
             value: reader.read_i32::<LE>()?,
         })
     }
 }
-impl<W: Write, V> Writable<W, V> for CustomFormatData {
-    fn write(&self, writer: &mut Context<W, V>) -> TResult<()> {
+impl CustomFormatData {
+    fn write<W: Write, V>(&self, writer: &mut Context<W, V>) -> TResult<()> {
         self.id.write(writer)?;
         writer.write_i32::<LE>(self.value)?;
         Ok(())
@@ -3417,9 +3485,9 @@ impl VersionInfo for Header {
             .unwrap_or_default()
     }
 }
-impl<R: Read + Seek, V> Readable<R, V> for Header {
+impl Header {
     #[instrument(name = "Header_read", skip_all)]
-    fn read(reader: &mut Context<R, V>) -> TResult<Self> {
+    fn read<R: Read + Seek, V>(reader: &mut Context<R, V>) -> TResult<Self> {
         let magic = reader.read_u32::<LE>()?;
         if reader.log() && magic != u32::from_le_bytes(*b"GVAS") {
             eprintln!(
@@ -3461,8 +3529,8 @@ impl<R: Read + Seek, V> Readable<R, V> for Header {
         })
     }
 }
-impl<W: Write, V> Writable<W, V> for Header {
-    fn write(&self, writer: &mut Context<W, V>) -> TResult<()> {
+impl Header {
+    fn write<W: Write, V>(&self, writer: &mut Context<W, V>) -> TResult<()> {
         writer.write_u32::<LE>(self.magic)?;
         writer.write_u32::<LE>(self.save_game_version)?;
         writer.write_u32::<LE>(self.package_version.ue4)?;
