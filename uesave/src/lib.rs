@@ -28,14 +28,17 @@ match save.root.properties["NumberOfGamesPlayed"] {
 */
 
 mod archive;
+mod context;
 mod error;
 
 #[cfg(test)]
 mod tests;
 
+pub use context::Types;
 pub use error::{Error, ParseError};
 
 use byteorder::{ReadBytesExt, WriteBytesExt, LE};
+use context::Context;
 use std::{
     borrow::Cow,
     io::{Cursor, Read, Seek, Write},
@@ -46,7 +49,10 @@ use serde::{de::Visitor, Deserialize, Deserializer, Serialize, Serializer};
 
 use tracing::instrument;
 
-use crate::archive::{ArchiveReader, ArchiveWriter};
+use crate::{
+    archive::{ArchiveReader, ArchiveWriter},
+    context::{ContextState, Scope},
+};
 
 type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -185,57 +191,57 @@ impl<R: Read> Read for SeekReader<R> {
 }
 
 #[instrument(skip_all)]
-fn read_optional_uuid<R: Read + Seek>(reader: &mut Context<R>) -> Result<Option<FGuid>> {
-    Ok(if reader.read_u8()? > 0 {
-        Some(FGuid::read(reader)?)
+fn read_optional_uuid<A: ArchiveReader>(ar: &mut A) -> Result<Option<FGuid>> {
+    Ok(if ar.read_u8()? > 0 {
+        Some(FGuid::read(ar)?)
     } else {
         None
     })
 }
-fn write_optional_uuid<W: Write + Seek>(writer: &mut Context<W>, id: Option<FGuid>) -> Result<()> {
+fn write_optional_uuid<A: ArchiveWriter>(ar: &mut A, id: Option<FGuid>) -> Result<()> {
     if let Some(id) = id {
-        writer.write_u8(1)?;
-        id.write(writer)?;
+        ar.write_u8(1)?;
+        id.write(ar)?;
     } else {
-        writer.write_u8(0)?;
+        ar.write_u8(0)?;
     }
     Ok(())
 }
 
 #[instrument(skip_all, ret)]
-fn read_string<R: Read + Seek>(reader: &mut Context<R>) -> Result<String> {
-    let len = reader.read_i32::<LE>()?;
+fn read_string<A: ArchiveReader>(ar: &mut A) -> Result<String> {
+    let len = ar.read_i32::<LE>()?;
     if len < 0 {
-        let chars = read_array((-len) as u32, reader, |r| Ok(r.read_u16::<LE>()?))?;
+        let chars = read_array((-len) as u32, ar, |r| Ok(r.read_u16::<LE>()?))?;
         let length = chars.iter().position(|&c| c == 0).unwrap_or(chars.len());
         Ok(String::from_utf16(&chars[..length]).unwrap())
     } else {
         let mut chars = vec![0; len as usize];
-        reader.read_exact(&mut chars)?;
+        ar.read_exact(&mut chars)?;
         let length = chars.iter().position(|&c| c == 0).unwrap_or(chars.len());
         Ok(String::from_utf8_lossy(&chars[..length]).into_owned())
     }
 }
-#[instrument(skip(writer))]
-fn write_string<W: Write + Seek>(writer: &mut Context<W>, string: &str) -> Result<()> {
+#[instrument(skip(ar))]
+fn write_string<A: ArchiveWriter>(ar: &mut A, string: &str) -> Result<()> {
     if string.is_empty() {
-        writer.write_u32::<LE>(0)?;
+        ar.write_u32::<LE>(0)?;
     } else {
-        write_string_trailing(writer, string, None)?;
+        write_string_trailing(ar, string, None)?;
     }
     Ok(())
 }
 
 #[instrument(skip_all)]
-fn read_string_trailing<R: Read + Seek>(reader: &mut Context<R>) -> Result<(String, Vec<u8>)> {
-    let len = reader.read_i32::<LE>()?;
+fn read_string_trailing<A: ArchiveReader>(ar: &mut A) -> Result<(String, Vec<u8>)> {
+    let len = ar.read_i32::<LE>()?;
     if len < 0 {
         let bytes = (-len) as usize * 2;
         let mut chars = vec![];
         let mut rest = vec![];
         let mut read = 0;
         while read < bytes {
-            let next = reader.read_u16::<LE>()?;
+            let next = ar.read_u16::<LE>()?;
             read += 2;
             if next == 0 {
                 rest.extend(next.to_le_bytes());
@@ -245,7 +251,7 @@ fn read_string_trailing<R: Read + Seek>(reader: &mut Context<R>) -> Result<(Stri
             }
         }
         while read < bytes {
-            rest.push(reader.read_u8()?);
+            rest.push(ar.read_u8()?);
             read += 1;
         }
         Ok((String::from_utf16(&chars).unwrap(), rest))
@@ -255,7 +261,7 @@ fn read_string_trailing<R: Read + Seek>(reader: &mut Context<R>) -> Result<(Stri
         let mut rest = vec![];
         let mut read = 0;
         while read < bytes {
-            let next = reader.read_u8()?;
+            let next = ar.read_u8()?;
             read += 1;
             if next == 0 {
                 rest.push(next);
@@ -265,31 +271,29 @@ fn read_string_trailing<R: Read + Seek>(reader: &mut Context<R>) -> Result<(Stri
             }
         }
         while read < bytes {
-            rest.push(reader.read_u8()?);
+            rest.push(ar.read_u8()?);
             read += 1;
         }
         Ok((String::from_utf8(chars).unwrap(), rest))
     }
 }
 #[instrument(skip_all)]
-fn write_string_trailing<W: Write + Seek>(
-    writer: &mut Context<W>,
+fn write_string_trailing<A: ArchiveWriter>(
+    ar: &mut A,
     string: &str,
     trailing: Option<&[u8]>,
 ) -> Result<()> {
     if string.is_empty() || string.is_ascii() {
-        writer.write_u32::<LE>((string.len() + trailing.map(|t| t.len()).unwrap_or(1)) as u32)?;
-        writer.write_all(string.as_bytes())?;
-        writer.write_all(trailing.unwrap_or(&[0]))?;
+        ar.write_u32::<LE>((string.len() + trailing.map(|t| t.len()).unwrap_or(1)) as u32)?;
+        ar.write_all(string.as_bytes())?;
+        ar.write_all(trailing.unwrap_or(&[0]))?;
     } else {
         let chars: Vec<u16> = string.encode_utf16().collect();
-        writer.write_i32::<LE>(
-            -((chars.len() + trailing.map(|t| t.len()).unwrap_or(2) / 2) as i32),
-        )?;
+        ar.write_i32::<LE>(-((chars.len() + trailing.map(|t| t.len()).unwrap_or(2) / 2) as i32))?;
         for c in chars {
-            writer.write_u16::<LE>(c)?;
+            ar.write_u16::<LE>(c)?;
         }
-        writer.write_all(trailing.unwrap_or(&[0, 0]))?;
+        ar.write_all(trailing.unwrap_or(&[0, 0]))?;
     }
     Ok(())
 }
@@ -442,11 +446,11 @@ fn write_property<W: Write + Seek>(
 }
 
 #[instrument(skip_all)]
-fn read_array<T, F, R: Read + Seek>(length: u32, reader: &mut Context<R>, f: F) -> Result<Vec<T>>
+fn read_array<T, F, A: ArchiveReader>(length: u32, ar: &mut A, f: F) -> Result<Vec<T>>
 where
-    F: Fn(&mut Context<R>) -> Result<T>,
+    F: Fn(&mut A) -> Result<T>,
 {
-    (0..length).map(|_| f(reader)).collect()
+    (0..length).map(|_| f(ar)).collect()
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -557,137 +561,6 @@ impl FGuid {
         ar.write_u32::<LE>(self.c)?;
         ar.write_u32::<LE>(self.d)?;
         Ok(())
-    }
-}
-
-/// Used to disambiguate types within a [`Property::Set`] or [`Property::Map`] during parsing.
-#[derive(Debug, Default, Clone)]
-pub struct Types {
-    types: std::collections::HashMap<String, StructType>,
-}
-impl Types {
-    /// Create an empty [`Types`] specification
-    pub fn new() -> Self {
-        Self::default()
-    }
-    /// Add a new type at the given path
-    pub fn add(&mut self, path: String, t: StructType) {
-        // TODO: Handle escaping of '.' in property names
-        // probably should store keys as Vec<String>
-        self.types.insert(path, t);
-    }
-}
-
-/// Represents the current position in the property hierarchy as a stack of names.
-/// Used for looking up type hints in the Types map.
-#[derive(Debug, Clone, Default)]
-struct Scope {
-    components: Vec<String>,
-}
-
-impl Scope {
-    fn root() -> Self {
-        Self::default()
-    }
-
-    fn path(&self) -> String {
-        self.components.join(".")
-    }
-
-    fn push(&mut self, name: &str) {
-        self.components.push(name.to_string());
-    }
-
-    fn pop(&mut self) {
-        self.components.pop();
-    }
-}
-
-#[derive(Debug)]
-struct Context<S> {
-    stream: S,
-    state: ContextState,
-}
-#[derive(Debug)]
-struct ContextState {
-    version: Option<Header>,
-    types: Rc<Types>,
-    scope: Scope,
-    log: bool,
-}
-impl<R: Read> Read for Context<R> {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        self.stream.read(buf)
-    }
-}
-impl<S: Seek> Seek for Context<S> {
-    fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
-        self.stream.seek(pos)
-    }
-}
-impl<W: Write + Seek> Write for Context<W> {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.stream.write(buf)
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.stream.flush()
-    }
-}
-
-impl<S> Context<S> {
-    fn run<F, T>(stream: S, f: F) -> T
-    where
-        F: FnOnce(&mut Context<S>) -> T,
-    {
-        f(&mut Context {
-            stream,
-            state: ContextState {
-                version: None,
-                types: Rc::new(Types::new()),
-                scope: Scope::root(),
-                log: false,
-            },
-        })
-    }
-    fn with_scope<F, T>(&mut self, name: &str, f: F) -> T
-    where
-        F: FnOnce(&mut Context<S>) -> T,
-    {
-        self.state.scope.push(name);
-        let result = f(self);
-        self.state.scope.pop();
-        result
-    }
-    fn path(&self) -> String {
-        self.state.scope.path()
-    }
-    fn get_type(&self) -> Option<&StructType> {
-        self.state.types.types.get(&self.path())
-    }
-    fn set_version(&mut self, version: Header) {
-        self.state.version = Some(version);
-    }
-    fn version(&self) -> &Header {
-        self.state.version.as_ref().expect("version info not set")
-    }
-    fn log(&self) -> bool {
-        self.state.log
-    }
-}
-impl<R: Read + Seek> Context<R> {
-    fn get_type_or(&mut self, t: &StructType) -> Result<StructType> {
-        let offset = self.stream.stream_position()?;
-        Ok(self.get_type().cloned().unwrap_or_else(|| {
-            if self.log() {
-                eprintln!(
-                    "offset {}: StructType for \"{}\" unspecified, assuming {:?}",
-                    offset,
-                    self.path(),
-                    t
-                );
-            }
-            t.clone()
-        }))
     }
 }
 
@@ -1742,18 +1615,18 @@ pub struct FieldPath {
 }
 impl FieldPath {
     #[instrument(name = "FieldPath_read", skip_all)]
-    fn read<R: Read + Seek>(reader: &mut Context<R>) -> Result<Self> {
+    fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
         Ok(Self {
-            path: read_array(reader.read_u32::<LE>()?, reader, read_string)?,
-            owner: read_string(reader)?,
+            path: read_array(ar.read_u32::<LE>()?, ar, read_string)?,
+            owner: read_string(ar)?,
         })
     }
-    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
-        writer.write_u32::<LE>(self.path.len() as u32)?;
+    fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
+        ar.write_u32::<LE>(self.path.len() as u32)?;
         for p in &self.path {
-            write_string(writer, p)?;
+            write_string(ar, p)?;
         }
-        write_string(writer, &self.owner)?;
+        write_string(ar, &self.owner)?;
         Ok(())
     }
 }
@@ -1765,15 +1638,15 @@ pub struct Delegate {
 }
 impl Delegate {
     #[instrument(name = "Delegate_read", skip_all)]
-    fn read<R: Read + Seek>(reader: &mut Context<R>) -> Result<Self> {
+    fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
         Ok(Self {
-            name: read_string(reader)?,
-            path: read_string(reader)?,
+            name: read_string(ar)?,
+            path: read_string(ar)?,
         })
     }
-    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
-        write_string(writer, &self.name)?;
-        write_string(writer, &self.path)?;
+    fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
+        write_string(ar, &self.name)?;
+        write_string(ar, &self.path)?;
         Ok(())
     }
 }
@@ -1782,17 +1655,13 @@ impl Delegate {
 pub struct MulticastDelegate(Vec<Delegate>);
 impl MulticastDelegate {
     #[instrument(name = "MulticastDelegate_read", skip_all)]
-    fn read<R: Read + Seek>(reader: &mut Context<R>) -> Result<Self> {
-        Ok(Self(read_array(
-            reader.read_u32::<LE>()?,
-            reader,
-            Delegate::read,
-        )?))
+    fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
+        Ok(Self(read_array(ar.read_u32::<LE>()?, ar, Delegate::read)?))
     }
-    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
-        writer.write_u32::<LE>(self.0.len() as u32)?;
+    fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
+        ar.write_u32::<LE>(self.0.len() as u32)?;
         for entry in &self.0 {
-            entry.write(writer)?;
+            entry.write(ar)?;
         }
         Ok(())
     }
@@ -1802,17 +1671,13 @@ impl MulticastDelegate {
 pub struct MulticastInlineDelegate(Vec<Delegate>);
 impl MulticastInlineDelegate {
     #[instrument(name = "MulticastInlineDelegate_read", skip_all)]
-    fn read<R: Read + Seek>(reader: &mut Context<R>) -> Result<Self> {
-        Ok(Self(read_array(
-            reader.read_u32::<LE>()?,
-            reader,
-            Delegate::read,
-        )?))
+    fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
+        Ok(Self(read_array(ar.read_u32::<LE>()?, ar, Delegate::read)?))
     }
-    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
-        writer.write_u32::<LE>(self.0.len() as u32)?;
+    fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
+        ar.write_u32::<LE>(self.0.len() as u32)?;
         for entry in &self.0 {
-            entry.write(writer)?;
+            entry.write(ar)?;
         }
         Ok(())
     }
@@ -1822,17 +1687,13 @@ impl MulticastInlineDelegate {
 pub struct MulticastSparseDelegate(Vec<Delegate>);
 impl MulticastSparseDelegate {
     #[instrument(name = "MulticastSparseDelegate_read", skip_all)]
-    fn read<R: Read + Seek>(reader: &mut Context<R>) -> Result<Self> {
-        Ok(Self(read_array(
-            reader.read_u32::<LE>()?,
-            reader,
-            Delegate::read,
-        )?))
+    fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
+        Ok(Self(read_array(ar.read_u32::<LE>()?, ar, Delegate::read)?))
     }
-    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
-        writer.write_u32::<LE>(self.0.len() as u32)?;
+    fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
+        ar.write_u32::<LE>(self.0.len() as u32)?;
         for entry in &self.0 {
-            entry.write(writer)?;
+            entry.write(ar)?;
         }
         Ok(())
     }
@@ -1847,19 +1708,19 @@ pub struct LinearColor {
 }
 impl LinearColor {
     #[instrument(name = "LinearColor_read", skip_all)]
-    fn read<R: Read + Seek>(reader: &mut Context<R>) -> Result<Self> {
+    fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
         Ok(Self {
-            r: reader.read_f32::<LE>()?.into(),
-            g: reader.read_f32::<LE>()?.into(),
-            b: reader.read_f32::<LE>()?.into(),
-            a: reader.read_f32::<LE>()?.into(),
+            r: ar.read_f32::<LE>()?.into(),
+            g: ar.read_f32::<LE>()?.into(),
+            b: ar.read_f32::<LE>()?.into(),
+            a: ar.read_f32::<LE>()?.into(),
         })
     }
-    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
-        writer.write_f32::<LE>(self.r.into())?;
-        writer.write_f32::<LE>(self.g.into())?;
-        writer.write_f32::<LE>(self.b.into())?;
-        writer.write_f32::<LE>(self.a.into())?;
+    fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
+        ar.write_f32::<LE>(self.r.into())?;
+        ar.write_f32::<LE>(self.g.into())?;
+        ar.write_f32::<LE>(self.b.into())?;
+        ar.write_f32::<LE>(self.a.into())?;
         Ok(())
     }
 }
@@ -1872,34 +1733,34 @@ pub struct Quat {
 }
 impl Quat {
     #[instrument(name = "Quat_read", skip_all)]
-    fn read<R: Read + Seek>(reader: &mut Context<R>) -> Result<Self> {
-        if reader.version().large_world_coordinates() {
+    fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
+        if ar.version().large_world_coordinates() {
             Ok(Self {
-                x: reader.read_f64::<LE>()?.into(),
-                y: reader.read_f64::<LE>()?.into(),
-                z: reader.read_f64::<LE>()?.into(),
-                w: reader.read_f64::<LE>()?.into(),
+                x: ar.read_f64::<LE>()?.into(),
+                y: ar.read_f64::<LE>()?.into(),
+                z: ar.read_f64::<LE>()?.into(),
+                w: ar.read_f64::<LE>()?.into(),
             })
         } else {
             Ok(Self {
-                x: reader.read_f32::<LE>()?.into(),
-                y: reader.read_f32::<LE>()?.into(),
-                z: reader.read_f32::<LE>()?.into(),
-                w: reader.read_f32::<LE>()?.into(),
+                x: ar.read_f32::<LE>()?.into(),
+                y: ar.read_f32::<LE>()?.into(),
+                z: ar.read_f32::<LE>()?.into(),
+                w: ar.read_f32::<LE>()?.into(),
             })
         }
     }
-    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
-        if writer.version().large_world_coordinates() {
-            writer.write_f64::<LE>(self.x.into())?;
-            writer.write_f64::<LE>(self.y.into())?;
-            writer.write_f64::<LE>(self.z.into())?;
-            writer.write_f64::<LE>(self.w.into())?;
+    fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
+        if ar.version().large_world_coordinates() {
+            ar.write_f64::<LE>(self.x.into())?;
+            ar.write_f64::<LE>(self.y.into())?;
+            ar.write_f64::<LE>(self.z.into())?;
+            ar.write_f64::<LE>(self.w.into())?;
         } else {
-            writer.write_f32::<LE>(self.x.into())?;
-            writer.write_f32::<LE>(self.y.into())?;
-            writer.write_f32::<LE>(self.z.into())?;
-            writer.write_f32::<LE>(self.w.into())?;
+            ar.write_f32::<LE>(self.x.into())?;
+            ar.write_f32::<LE>(self.y.into())?;
+            ar.write_f32::<LE>(self.z.into())?;
+            ar.write_f32::<LE>(self.w.into())?;
         }
         Ok(())
     }
@@ -1912,30 +1773,30 @@ pub struct Rotator {
 }
 impl Rotator {
     #[instrument(name = "Rotator_read", skip_all)]
-    fn read<R: Read + Seek>(reader: &mut Context<R>) -> Result<Self> {
-        if reader.version().large_world_coordinates() {
+    fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
+        if ar.version().large_world_coordinates() {
             Ok(Self {
-                x: reader.read_f64::<LE>()?.into(),
-                y: reader.read_f64::<LE>()?.into(),
-                z: reader.read_f64::<LE>()?.into(),
+                x: ar.read_f64::<LE>()?.into(),
+                y: ar.read_f64::<LE>()?.into(),
+                z: ar.read_f64::<LE>()?.into(),
             })
         } else {
             Ok(Self {
-                x: reader.read_f32::<LE>()?.into(),
-                y: reader.read_f32::<LE>()?.into(),
-                z: reader.read_f32::<LE>()?.into(),
+                x: ar.read_f32::<LE>()?.into(),
+                y: ar.read_f32::<LE>()?.into(),
+                z: ar.read_f32::<LE>()?.into(),
             })
         }
     }
-    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
-        if writer.version().large_world_coordinates() {
-            writer.write_f64::<LE>(self.x.into())?;
-            writer.write_f64::<LE>(self.y.into())?;
-            writer.write_f64::<LE>(self.z.into())?;
+    fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
+        if ar.version().large_world_coordinates() {
+            ar.write_f64::<LE>(self.x.into())?;
+            ar.write_f64::<LE>(self.y.into())?;
+            ar.write_f64::<LE>(self.z.into())?;
         } else {
-            writer.write_f32::<LE>(self.x.into())?;
-            writer.write_f32::<LE>(self.y.into())?;
-            writer.write_f32::<LE>(self.z.into())?;
+            ar.write_f32::<LE>(self.x.into())?;
+            ar.write_f32::<LE>(self.y.into())?;
+            ar.write_f32::<LE>(self.z.into())?;
         }
         Ok(())
     }
@@ -1949,19 +1810,19 @@ pub struct Color {
 }
 impl Color {
     #[instrument(name = "Color_read", skip_all)]
-    fn read<R: Read + Seek>(reader: &mut Context<R>) -> Result<Self> {
+    fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
         Ok(Self {
-            r: reader.read_u8()?,
-            g: reader.read_u8()?,
-            b: reader.read_u8()?,
-            a: reader.read_u8()?,
+            r: ar.read_u8()?,
+            g: ar.read_u8()?,
+            b: ar.read_u8()?,
+            a: ar.read_u8()?,
         })
     }
-    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
-        writer.write_u8(self.r)?;
-        writer.write_u8(self.g)?;
-        writer.write_u8(self.b)?;
-        writer.write_u8(self.a)?;
+    fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
+        ar.write_u8(self.r)?;
+        ar.write_u8(self.g)?;
+        ar.write_u8(self.b)?;
+        ar.write_u8(self.a)?;
         Ok(())
     }
 }
@@ -1973,30 +1834,30 @@ pub struct Vector {
 }
 impl Vector {
     #[instrument(name = "Vector_read", skip_all)]
-    fn read<R: Read + Seek>(reader: &mut Context<R>) -> Result<Self> {
-        if reader.version().large_world_coordinates() {
+    fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
+        if ar.version().large_world_coordinates() {
             Ok(Self {
-                x: reader.read_f64::<LE>()?.into(),
-                y: reader.read_f64::<LE>()?.into(),
-                z: reader.read_f64::<LE>()?.into(),
+                x: ar.read_f64::<LE>()?.into(),
+                y: ar.read_f64::<LE>()?.into(),
+                z: ar.read_f64::<LE>()?.into(),
             })
         } else {
             Ok(Self {
-                x: reader.read_f32::<LE>()?.into(),
-                y: reader.read_f32::<LE>()?.into(),
-                z: reader.read_f32::<LE>()?.into(),
+                x: ar.read_f32::<LE>()?.into(),
+                y: ar.read_f32::<LE>()?.into(),
+                z: ar.read_f32::<LE>()?.into(),
             })
         }
     }
-    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
-        if writer.version().large_world_coordinates() {
-            writer.write_f64::<LE>(self.x.into())?;
-            writer.write_f64::<LE>(self.y.into())?;
-            writer.write_f64::<LE>(self.z.into())?;
+    fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
+        if ar.version().large_world_coordinates() {
+            ar.write_f64::<LE>(self.x.into())?;
+            ar.write_f64::<LE>(self.y.into())?;
+            ar.write_f64::<LE>(self.z.into())?;
         } else {
-            writer.write_f32::<LE>(self.x.into())?;
-            writer.write_f32::<LE>(self.y.into())?;
-            writer.write_f32::<LE>(self.z.into())?;
+            ar.write_f32::<LE>(self.x.into())?;
+            ar.write_f32::<LE>(self.y.into())?;
+            ar.write_f32::<LE>(self.z.into())?;
         }
         Ok(())
     }
@@ -2008,26 +1869,26 @@ pub struct Vector2D {
 }
 impl Vector2D {
     #[instrument(name = "Vector2D_read", skip_all)]
-    fn read<R: Read + Seek>(reader: &mut Context<R>) -> Result<Self> {
-        if reader.version().large_world_coordinates() {
+    fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
+        if ar.version().large_world_coordinates() {
             Ok(Self {
-                x: reader.read_f64::<LE>()?.into(),
-                y: reader.read_f64::<LE>()?.into(),
+                x: ar.read_f64::<LE>()?.into(),
+                y: ar.read_f64::<LE>()?.into(),
             })
         } else {
             Ok(Self {
-                x: reader.read_f32::<LE>()?.into(),
-                y: reader.read_f32::<LE>()?.into(),
+                x: ar.read_f32::<LE>()?.into(),
+                y: ar.read_f32::<LE>()?.into(),
             })
         }
     }
-    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
-        if writer.version().large_world_coordinates() {
-            writer.write_f64::<LE>(self.x.into())?;
-            writer.write_f64::<LE>(self.y.into())?;
+    fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
+        if ar.version().large_world_coordinates() {
+            ar.write_f64::<LE>(self.x.into())?;
+            ar.write_f64::<LE>(self.y.into())?;
         } else {
-            writer.write_f32::<LE>(self.x.into())?;
-            writer.write_f32::<LE>(self.y.into())?;
+            ar.write_f32::<LE>(self.x.into())?;
+            ar.write_f32::<LE>(self.y.into())?;
         }
         Ok(())
     }
@@ -2040,17 +1901,17 @@ pub struct IntVector {
 }
 impl IntVector {
     #[instrument(name = "IntVector_read", skip_all)]
-    fn read<R: Read + Seek>(reader: &mut Context<R>) -> Result<Self> {
+    fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
         Ok(Self {
-            x: reader.read_i32::<LE>()?,
-            y: reader.read_i32::<LE>()?,
-            z: reader.read_i32::<LE>()?,
+            x: ar.read_i32::<LE>()?,
+            y: ar.read_i32::<LE>()?,
+            z: ar.read_i32::<LE>()?,
         })
     }
-    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
-        writer.write_i32::<LE>(self.x)?;
-        writer.write_i32::<LE>(self.y)?;
-        writer.write_i32::<LE>(self.z)?;
+    fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
+        ar.write_i32::<LE>(self.x)?;
+        ar.write_i32::<LE>(self.y)?;
+        ar.write_i32::<LE>(self.z)?;
         Ok(())
     }
 }
@@ -2083,15 +1944,15 @@ pub struct IntPoint {
 }
 impl IntPoint {
     #[instrument(name = "IntPoint_read", skip_all)]
-    fn read<R: Read + Seek>(reader: &mut Context<R>) -> Result<Self> {
+    fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
         Ok(Self {
-            x: reader.read_i32::<LE>()?,
-            y: reader.read_i32::<LE>()?,
+            x: ar.read_i32::<LE>()?,
+            y: ar.read_i32::<LE>()?,
         })
     }
-    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
-        writer.write_i32::<LE>(self.x)?;
-        writer.write_i32::<LE>(self.y)?;
+    fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
+        ar.write_i32::<LE>(self.x)?;
+        ar.write_i32::<LE>(self.y)?;
         Ok(())
     }
 }
@@ -2153,13 +2014,13 @@ pub struct GameplayTag {
 }
 impl GameplayTag {
     #[instrument(name = "GameplayTag_read", skip_all)]
-    fn read<R: Read + Seek>(reader: &mut Context<R>) -> Result<Self> {
+    fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
         Ok(Self {
-            name: read_string(reader)?,
+            name: read_string(ar)?,
         })
     }
-    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
-        write_string(writer, &self.name)?;
+    fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
+        write_string(ar, &self.name)?;
         Ok(())
     }
 }
@@ -2170,15 +2031,15 @@ pub struct GameplayTagContainer {
 }
 impl GameplayTagContainer {
     #[instrument(name = "GameplayTagContainer_read", skip_all)]
-    fn read<R: Read + Seek>(reader: &mut Context<R>) -> Result<Self> {
+    fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
         Ok(Self {
-            gameplay_tags: read_array(reader.read_u32::<LE>()?, reader, GameplayTag::read)?,
+            gameplay_tags: read_array(ar.read_u32::<LE>()?, ar, GameplayTag::read)?,
         })
     }
-    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
-        writer.write_u32::<LE>(self.gameplay_tags.len() as u32)?;
+    fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
+        ar.write_u32::<LE>(self.gameplay_tags.len() as u32)?;
         for entry in &self.gameplay_tags {
-            entry.write(writer)?;
+            entry.write(ar)?;
         }
         Ok(())
     }
@@ -2196,27 +2057,27 @@ pub struct UniqueNetIdReplInner {
 }
 impl UniqueNetIdRepl {
     #[instrument(name = "UniqueNetIdRepl_read", skip_all)]
-    fn read<R: Read + Seek>(reader: &mut Context<R>) -> Result<Self> {
-        let size = reader.read_u32::<LE>()?;
+    fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
+        let size = ar.read_u32::<LE>()?;
         let inner = if let Ok(size) = size.try_into() {
             Some(UniqueNetIdReplInner {
                 size,
-                type_: read_string(reader)?,
-                contents: read_string(reader)?,
+                type_: read_string(ar)?,
+                contents: read_string(ar)?,
             })
         } else {
             None
         };
         Ok(Self { inner })
     }
-    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
+    fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
         match &self.inner {
             Some(inner) => {
-                writer.write_u32::<LE>(inner.size.into())?;
-                write_string(writer, &inner.type_)?;
-                write_string(writer, &inner.contents)?;
+                ar.write_u32::<LE>(inner.size.into())?;
+                write_string(ar, &inner.type_)?;
+                write_string(ar, &inner.contents)?;
             }
-            None => writer.write_u32::<LE>(0)?,
+            None => ar.write_u32::<LE>(0)?,
         }
         Ok(())
     }
@@ -2819,9 +2680,7 @@ impl ValueVec {
                     })?))
                 }
             }
-            PropertyType::EnumProperty => {
-                ValueVec::Enum(read_array(count, reader, |r| read_string(r))?)
-            }
+            PropertyType::EnumProperty => ValueVec::Enum(read_array(count, reader, read_string)?),
             PropertyType::StrProperty => ValueVec::Str(read_array(count, reader, read_string)?),
             PropertyType::TextProperty => ValueVec::Text(read_array(count, reader, Text::read)?),
             PropertyType::SoftObjectProperty => {
