@@ -417,14 +417,27 @@ fn write_property<W: Write + Seek>(
         .tag
         .clone()
         .into_full(&prop.0 .1, 0, prop.0 .0, prop.1);
-    let mut buf = vec![];
-    let size = writer.with_stream(&mut Cursor::new(&mut buf), |writer| {
-        prop.1.write(writer, &tag)
-    })? as u32;
+
+    // Write tag with placeholder size
+    tag.size = 0;
+    let tag_start = writer.stream_position()?;
+    tag.write(writer)?;
+    let data_start = writer.stream_position()?;
+
+    // Write the actual property data
+    prop.1.write(writer, &tag)?;
+    let data_end = writer.stream_position()?;
+
+    // Calculate actual size
+    let size = (data_end - data_start) as u32;
     tag.size = size;
 
+    // Seek back and rewrite the tag with correct size
+    writer.seek(std::io::SeekFrom::Start(tag_start))?;
     tag.write(writer)?;
-    writer.write_all(&buf[..])?;
+
+    // Seek to end to continue writing
+    writer.seek(std::io::SeekFrom::Start(data_end))?;
     Ok(())
 }
 
@@ -644,20 +657,6 @@ impl<S> Context<S> {
         let result = f(self);
         self.state.scope.pop();
         result
-    }
-    fn with_stream<F, T, S2>(&mut self, stream: S2, f: F) -> T
-    where
-        F: FnOnce(&mut Context<S2>) -> T,
-    {
-        f(&mut Context {
-            stream,
-            state: ContextState {
-                version: self.state.version.clone(),
-                types: self.state.types.clone(),
-                scope: self.state.scope.clone(),
-                log: self.state.log,
-            },
-        })
     }
     fn path(&self) -> String {
         self.state.scope.path()
@@ -3008,24 +3007,37 @@ impl ValueArray {
             } => {
                 writer.write_u32::<LE>(value.len() as u32)?;
 
-                let mut buf = vec![];
-                let mut cur = Cursor::new(&mut buf);
-                for v in value {
-                    writer.with_stream(&mut cur, |writer| v.write(writer))?;
-                }
-
                 if !writer.version().property_tag() && writer.version().array_inner_tag() {
                     write_string(writer, &tag.name)?;
                     type_.write(writer)?;
-                    writer.write_u32::<LE>(buf.len() as u32)?;
+
+                    // Write placeholder size
+                    let size_pos = writer.stream_position()?;
+                    writer.write_u32::<LE>(0)?;
                     writer.write_u32::<LE>(0)?;
                     struct_type.write(writer)?;
                     if let Some(id) = id {
                         id.write(writer)?;
                     }
                     writer.write_u8(0)?;
+
+                    // Write data and measure size
+                    let data_start = writer.stream_position()?;
+                    for v in value {
+                        v.write(writer)?;
+                    }
+                    let data_end = writer.stream_position()?;
+                    let size = (data_end - data_start) as u32;
+
+                    // Seek back and write actual size
+                    writer.seek(std::io::SeekFrom::Start(size_pos))?;
+                    writer.write_u32::<LE>(size)?;
+                    writer.seek(std::io::SeekFrom::Start(data_end))?;
+                } else {
+                    for v in value {
+                        v.write(writer)?;
+                    }
                 }
-                writer.write_all(&buf)?;
             }
             ValueArray::Base(vec) => {
                 vec.write(writer)?;
@@ -3228,171 +3240,102 @@ impl Property {
             },
         })
     }
-    fn write<W: Write + Seek>(
-        &self,
-        writer: &mut Context<W>,
-        tag: &PropertyTagFull,
-    ) -> Result<usize> {
-        Ok(match &self.inner {
+    fn write<W: Write + Seek>(&self, writer: &mut Context<W>, tag: &PropertyTagFull) -> Result<()> {
+        match &self.inner {
             PropertyInner::Int8(value) => {
                 writer.write_i8(*value)?;
-                1
             }
             PropertyInner::Int16(value) => {
                 writer.write_i16::<LE>(*value)?;
-                2
             }
             PropertyInner::Int(value) => {
                 writer.write_i32::<LE>(*value)?;
-                4
             }
             PropertyInner::Int64(value) => {
                 writer.write_i64::<LE>(*value)?;
-                8
             }
             PropertyInner::UInt8(value) => {
                 writer.write_u8(*value)?;
-                1
             }
             PropertyInner::UInt16(value) => {
                 writer.write_u16::<LE>(*value)?;
-                2
             }
             PropertyInner::UInt32(value) => {
                 writer.write_u32::<LE>(*value)?;
-                4
             }
             PropertyInner::UInt64(value) => {
                 writer.write_u64::<LE>(*value)?;
-                8
             }
             PropertyInner::Float(value) => {
                 writer.write_f32::<LE>((*value).into())?;
-                4
             }
             PropertyInner::Double(value) => {
                 writer.write_f64::<LE>((*value).into())?;
-                8
             }
-            PropertyInner::Bool(_) => 0,
+            PropertyInner::Bool(_) => {}
             PropertyInner::Byte(value) => match value {
                 Byte::Byte(b) => {
                     writer.write_u8(*b)?;
-                    1
                 }
                 Byte::Label(l) => {
                     write_string(writer, l)?;
-                    l.len() + 5
                 }
             },
             PropertyInner::Enum(value) => {
                 write_string(writer, value)?;
-                value.len() + 5
             }
             PropertyInner::Name(value) => {
-                let mut buf = vec![];
-                writer.with_stream(&mut Cursor::new(&mut buf), |writer| {
-                    write_string(writer, value)
-                })?;
-                writer.write_all(&buf)?;
-                buf.len()
+                write_string(writer, value)?;
             }
             PropertyInner::Str(value) => {
-                let mut buf = vec![];
-                writer.with_stream(&mut Cursor::new(&mut buf), |writer| {
-                    write_string(writer, value)
-                })?;
-                writer.write_all(&buf)?;
-                buf.len()
+                write_string(writer, value)?;
             }
             PropertyInner::FieldPath(value) => {
-                let mut buf = vec![];
-                writer.with_stream(&mut Cursor::new(&mut buf), |writer| value.write(writer))?;
-                writer.write_all(&buf)?;
-                buf.len()
+                value.write(writer)?;
             }
             PropertyInner::SoftObject(value) => {
-                let mut buf = vec![];
-                writer.with_stream(&mut Cursor::new(&mut buf), |writer| value.write(writer))?;
-                writer.write_all(&buf)?;
-                buf.len()
+                value.write(writer)?;
             }
             PropertyInner::Object(value) => {
-                let mut buf = vec![];
-                writer.with_stream(&mut Cursor::new(&mut buf), |writer| {
-                    write_string(writer, value)
-                })?;
-                writer.write_all(&buf)?;
-                buf.len()
+                write_string(writer, value)?;
             }
             PropertyInner::Text(value) => {
-                let mut buf = vec![];
-                writer.with_stream(&mut Cursor::new(&mut buf), |writer| value.write(writer))?;
-                writer.write_all(&buf)?;
-                buf.len()
+                value.write(writer)?;
             }
             PropertyInner::Delegate(value) => {
-                let mut buf = vec![];
-                writer.with_stream(&mut Cursor::new(&mut buf), |writer| value.write(writer))?;
-                writer.write_all(&buf)?;
-                buf.len()
+                value.write(writer)?;
             }
             PropertyInner::MulticastDelegate(value) => {
-                let mut buf = vec![];
-                writer.with_stream(&mut Cursor::new(&mut buf), |writer| value.write(writer))?;
-                writer.write_all(&buf)?;
-                buf.len()
+                value.write(writer)?;
             }
             PropertyInner::MulticastInlineDelegate(value) => {
-                let mut buf = vec![];
-                writer.with_stream(&mut Cursor::new(&mut buf), |writer| value.write(writer))?;
-                writer.write_all(&buf)?;
-                buf.len()
+                value.write(writer)?;
             }
             PropertyInner::MulticastSparseDelegate(value) => {
-                let mut buf = vec![];
-                writer.with_stream(&mut Cursor::new(&mut buf), |writer| value.write(writer))?;
-                writer.write_all(&buf)?;
-                buf.len()
+                value.write(writer)?;
             }
             PropertyInner::Set(value) => {
-                let mut buf = vec![];
-                let mut cur = Cursor::new(&mut buf);
-                cur.write_u32::<LE>(0)?;
-                writer.with_stream(&mut cur, |writer| value.write(writer))?;
-                writer.write_all(&buf)?;
-                buf.len()
+                writer.write_u32::<LE>(0)?;
+                value.write(writer)?;
             }
             PropertyInner::Map(value) => {
-                let mut buf = vec![];
-                let mut cur = Cursor::new(&mut buf);
-                cur.write_u32::<LE>(0)?;
-                cur.write_u32::<LE>(value.len() as u32)?;
+                writer.write_u32::<LE>(0)?;
+                writer.write_u32::<LE>(value.len() as u32)?;
                 for v in value {
-                    writer.with_stream(&mut cur, |writer| v.write(writer))?;
+                    v.write(writer)?;
                 }
-                writer.write_all(&buf)?;
-                buf.len()
             }
             PropertyInner::Struct(value) => {
-                let mut buf = vec![];
-                writer.with_stream(&mut Cursor::new(&mut buf), |writer| value.write(writer))?;
-                writer.write_all(&buf)?;
-                buf.len()
+                value.write(writer)?;
             }
             PropertyInner::Array(value) => {
-                let mut buf = vec![];
-                writer.with_stream(&mut Cursor::new(&mut buf), |writer| {
-                    value.write(writer, tag)
-                })?;
-                writer.write_all(&buf)?;
-                buf.len()
+                value.write(writer, tag)?;
             }
             PropertyInner::Raw(value) => {
                 writer.write_all(value)?;
-                value.len()
             }
-        })
+        }
+        Ok(())
     }
 }
 
