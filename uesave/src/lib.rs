@@ -585,8 +585,8 @@ impl Scope {
 }
 
 #[derive(Debug)]
-struct Context<'stream, 'types, S> {
-    stream: &'stream mut S,
+struct Context<'types, S> {
+    stream: S,
     state: ContextState<'types>,
 }
 #[derive(Debug)]
@@ -596,17 +596,17 @@ struct ContextState<'types> {
     scope: Scope,
     log: bool,
 }
-impl<R: Read> Read for Context<'_, '_, R> {
+impl<R: Read> Read for Context<'_, R> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         self.stream.read(buf)
     }
 }
-impl<S: Seek> Seek for Context<'_, '_, S> {
+impl<S: Seek> Seek for Context<'_, S> {
     fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
         self.stream.seek(pos)
     }
 }
-impl<W: Write> Write for Context<'_, '_, W> {
+impl<W: Write> Write for Context<'_, W> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         self.stream.write(buf)
     }
@@ -615,12 +615,12 @@ impl<W: Write> Write for Context<'_, '_, W> {
     }
 }
 
-impl<'stream, S> Context<'stream, '_, S> {
-    fn run<F, T>(stream: &'stream mut S, f: F) -> T
+impl<S> Context<'_, S> {
+    fn run<F, T>(stream: S, f: F) -> T
     where
-        F: FnOnce(&mut Context<'stream, '_, S>) -> T,
+        F: FnOnce(&mut Context<'_, S>) -> T,
     {
-        f(&mut Context::<'stream, '_> {
+        f(&mut Context::<'_> {
             stream,
             state: ContextState {
                 version: None,
@@ -631,19 +631,19 @@ impl<'stream, S> Context<'stream, '_, S> {
         })
     }
 }
-impl<'types, S> Context<'_, 'types, S> {
+impl<'types, S> Context<'types, S> {
     fn with_scope<F, T>(&mut self, name: &str, f: F) -> T
     where
-        F: FnOnce(&mut Context<'_, 'types, S>) -> T,
+        F: FnOnce(&mut Context<'types, S>) -> T,
     {
         self.state.scope.push(name);
         let result = f(self);
         self.state.scope.pop();
         result
     }
-    fn with_stream<'s, F, T, S2>(&mut self, stream: &'s mut S2, f: F) -> T
+    fn with_stream<F, T, S2>(&mut self, stream: S2, f: F) -> T
     where
-        F: FnOnce(&mut Context<'_, 'types, S2>) -> T,
+        F: FnOnce(&mut Context<'types, S2>) -> T,
     {
         f(&mut Context {
             stream,
@@ -671,7 +671,7 @@ impl<'types, S> Context<'_, 'types, S> {
         self.state.log
     }
 }
-impl<'types, R: Read + Seek> Context<'_, 'types, R> {
+impl<'types, R: Read + Seek> Context<'types, R> {
     fn get_type_or<'t>(&mut self, t: &'t StructType) -> Result<&'t StructType>
     where
         'types: 't,
@@ -3606,9 +3606,9 @@ impl<'types> SaveReader<'types> {
         let tmp = Types::new();
         let types = self.types.unwrap_or(&tmp);
 
-        let mut stream = SeekReader::new(stream);
+        let stream = SeekReader::new(stream);
         let mut reader = Context {
-            stream: &mut stream,
+            stream,
             state: ContextState {
                 version: None,
                 types,

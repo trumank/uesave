@@ -22,7 +22,7 @@ fn mock_header() -> Header {
     }
 }
 
-fn run<S, R, F>(s: &mut S, f: F) -> Result<R>
+fn run<S, R, F>(s: S, f: F) -> Result<R>
 where
     F: FnOnce(&mut Context<S>) -> Result<R>,
 {
