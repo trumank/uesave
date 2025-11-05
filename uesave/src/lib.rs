@@ -1923,17 +1923,17 @@ pub struct Box {
 }
 impl Box {
     #[instrument(name = "Box_read", skip_all)]
-    fn read<R: Read + Seek>(reader: &mut Context<R>) -> Result<Self> {
+    fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
         Ok(Self {
-            min: Vector::read(reader)?,
-            max: Vector::read(reader)?,
-            is_valid: reader.read_u8()? > 0,
+            min: Vector::read(ar)?,
+            max: Vector::read(ar)?,
+            is_valid: ar.read_u8()? > 0,
         })
     }
-    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
-        self.min.write(writer)?;
-        self.max.write(writer)?;
-        writer.write_u8(self.is_valid as u8)?;
+    fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
+        self.min.write(ar)?;
+        self.max.write(ar)?;
+        ar.write_u8(self.is_valid as u8)?;
         Ok(())
     }
 }
@@ -1971,37 +1971,37 @@ pub enum SoftObjectPath {
 }
 impl SoftObjectPath {
     #[instrument(name = "SoftObjectPath_read", skip_all)]
-    fn read<R: Read + Seek>(reader: &mut Context<R>) -> Result<Self> {
-        Ok(if reader.version().remove_asset_path_fnames() {
+    fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
+        Ok(if ar.version().remove_asset_path_fnames() {
             Self::New {
-                asset_path_name: read_string(reader)?,
-                package_name: read_string(reader)?,
-                asset_name: read_string_trailing(reader)?,
+                asset_path_name: read_string(ar)?,
+                package_name: read_string(ar)?,
+                asset_name: read_string_trailing(ar)?,
             }
         } else {
             Self::Old {
-                asset_path_name: read_string(reader)?,
-                sub_path_string: read_string(reader)?,
+                asset_path_name: read_string(ar)?,
+                sub_path_string: read_string(ar)?,
             }
         })
     }
-    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
+    fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
         match self {
             Self::Old {
                 asset_path_name,
                 sub_path_string,
             } => {
-                write_string(writer, asset_path_name)?;
-                write_string(writer, sub_path_string)?;
+                write_string(ar, asset_path_name)?;
+                write_string(ar, sub_path_string)?;
             }
             Self::New {
                 asset_path_name,
                 package_name,
                 asset_name: (asset_name, trailing),
             } => {
-                write_string(writer, asset_path_name)?;
-                write_string(writer, package_name)?;
-                write_string_trailing(writer, asset_name, Some(trailing))?;
+                write_string(ar, asset_path_name)?;
+                write_string(ar, package_name)?;
+                write_string_trailing(ar, asset_name, Some(trailing))?;
             }
         }
         Ok(())
@@ -2090,17 +2090,17 @@ pub struct FFormatArgumentData {
 }
 impl FFormatArgumentData {
     #[instrument(name = "FFormatArgumentData_read", skip_all)]
-    fn read<R: Read + Seek>(reader: &mut Context<R>) -> Result<Self> {
+    fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
         Ok(Self {
-            name: read_string(reader)?,
-            value: FFormatArgumentDataValue::read(reader)?,
+            name: read_string(ar)?,
+            value: FFormatArgumentDataValue::read(ar)?,
         })
     }
 }
 impl FFormatArgumentData {
-    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
-        write_string(writer, &self.name)?;
-        self.value.write(writer)?;
+    fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
+        write_string(ar, &self.name)?;
+        self.value.write(ar)?;
         Ok(())
     }
 }
@@ -2117,15 +2117,15 @@ pub enum FFormatArgumentDataValue {
 }
 impl FFormatArgumentDataValue {
     #[instrument(name = "FFormatArgumentDataValue_read", skip_all)]
-    fn read<R: Read + Seek>(reader: &mut Context<R>) -> Result<Self> {
-        let type_ = reader.read_u8()?;
+    fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
+        let type_ = ar.read_u8()?;
         match type_ {
-            0 => Ok(Self::Int(reader.read_i32::<LE>()?)),
-            1 => Ok(Self::UInt(reader.read_u32::<LE>()?)),
-            2 => Ok(Self::Float(reader.read_f32::<LE>()?.into())),
-            3 => Ok(Self::Double(reader.read_f64::<LE>()?.into())),
-            4 => Ok(Self::Text(std::boxed::Box::new(Text::read(reader)?))),
-            5 => Ok(Self::Gender(reader.read_u64::<LE>()?)),
+            0 => Ok(Self::Int(ar.read_i32::<LE>()?)),
+            1 => Ok(Self::UInt(ar.read_u32::<LE>()?)),
+            2 => Ok(Self::Float(ar.read_f32::<LE>()?.into())),
+            3 => Ok(Self::Double(ar.read_f64::<LE>()?.into())),
+            4 => Ok(Self::Text(std::boxed::Box::new(Text::read(ar)?))),
+            5 => Ok(Self::Gender(ar.read_u64::<LE>()?)),
             _ => Err(Error::Other(format!(
                 "unimplemented variant for FFormatArgumentDataValue 0x{type_:x}"
             ))),
@@ -2133,31 +2133,31 @@ impl FFormatArgumentDataValue {
     }
 }
 impl FFormatArgumentDataValue {
-    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
+    fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
         match self {
             Self::Int(value) => {
-                writer.write_u8(0)?;
-                writer.write_i32::<LE>(*value)?;
+                ar.write_u8(0)?;
+                ar.write_i32::<LE>(*value)?;
             }
             Self::UInt(value) => {
-                writer.write_u8(1)?;
-                writer.write_u32::<LE>(*value)?;
+                ar.write_u8(1)?;
+                ar.write_u32::<LE>(*value)?;
             }
             Self::Float(value) => {
-                writer.write_u8(2)?;
-                writer.write_f32::<LE>((*value).into())?;
+                ar.write_u8(2)?;
+                ar.write_f32::<LE>((*value).into())?;
             }
             Self::Double(value) => {
-                writer.write_u8(3)?;
-                writer.write_f64::<LE>((*value).into())?;
+                ar.write_u8(3)?;
+                ar.write_f64::<LE>((*value).into())?;
             }
             Self::Text(value) => {
-                writer.write_u8(4)?;
-                value.write(writer)?;
+                ar.write_u8(4)?;
+                value.write(ar)?;
             }
             Self::Gender(value) => {
-                writer.write_u8(5)?;
-                writer.write_u64::<LE>(*value)?;
+                ar.write_u8(5)?;
+                ar.write_u64::<LE>(*value)?;
             }
         };
         Ok(())
@@ -2176,15 +2176,15 @@ pub enum FFormatArgumentValue {
 
 impl FFormatArgumentValue {
     #[instrument(name = "FFormatArgumentValue_read", skip_all)]
-    fn read<R: Read + Seek>(reader: &mut Context<R>) -> Result<Self> {
-        let type_ = reader.read_u8()?;
+    fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
+        let type_ = ar.read_u8()?;
         match type_ {
-            0 => Ok(Self::Int(reader.read_i64::<LE>()?)),
-            1 => Ok(Self::UInt(reader.read_u64::<LE>()?)),
-            2 => Ok(Self::Float(reader.read_f32::<LE>()?.into())),
-            3 => Ok(Self::Double(reader.read_f64::<LE>()?.into())),
-            4 => Ok(Self::Text(std::boxed::Box::new(Text::read(reader)?))),
-            5 => Ok(Self::Gender(reader.read_u64::<LE>()?)),
+            0 => Ok(Self::Int(ar.read_i64::<LE>()?)),
+            1 => Ok(Self::UInt(ar.read_u64::<LE>()?)),
+            2 => Ok(Self::Float(ar.read_f32::<LE>()?.into())),
+            3 => Ok(Self::Double(ar.read_f64::<LE>()?.into())),
+            4 => Ok(Self::Text(std::boxed::Box::new(Text::read(ar)?))),
+            5 => Ok(Self::Gender(ar.read_u64::<LE>()?)),
             _ => Err(Error::Other(format!(
                 "unimplemented variant for FFormatArgumentValue 0x{type_:x}"
             ))),
@@ -2192,31 +2192,31 @@ impl FFormatArgumentValue {
     }
 }
 impl FFormatArgumentValue {
-    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
+    fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
         match self {
             Self::Int(value) => {
-                writer.write_u8(0)?;
-                writer.write_i64::<LE>(*value)?;
+                ar.write_u8(0)?;
+                ar.write_i64::<LE>(*value)?;
             }
             Self::UInt(value) => {
-                writer.write_u8(1)?;
-                writer.write_u64::<LE>(*value)?;
+                ar.write_u8(1)?;
+                ar.write_u64::<LE>(*value)?;
             }
             Self::Float(value) => {
-                writer.write_u8(2)?;
-                writer.write_f32::<LE>((*value).into())?;
+                ar.write_u8(2)?;
+                ar.write_f32::<LE>((*value).into())?;
             }
             Self::Double(value) => {
-                writer.write_u8(3)?;
-                writer.write_f64::<LE>((*value).into())?;
+                ar.write_u8(3)?;
+                ar.write_f64::<LE>((*value).into())?;
             }
             Self::Text(value) => {
-                writer.write_u8(4)?;
-                value.write(writer)?;
+                ar.write_u8(4)?;
+                value.write(ar)?;
             }
             Self::Gender(value) => {
-                writer.write_u8(5)?;
-                writer.write_u64::<LE>(*value)?;
+                ar.write_u8(5)?;
+                ar.write_u64::<LE>(*value)?;
             }
         };
         Ok(())
@@ -2235,27 +2235,27 @@ pub struct FNumberFormattingOptions {
 }
 impl FNumberFormattingOptions {
     #[instrument(name = "FNumberFormattingOptions_read", skip_all)]
-    fn read<R: Read + Seek>(reader: &mut Context<R>) -> Result<Self> {
+    fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
         Ok(Self {
-            always_sign: reader.read_u32::<LE>()? != 0,
-            use_grouping: reader.read_u32::<LE>()? != 0,
-            rounding_mode: reader.read_i8()?,
-            minimum_integral_digits: reader.read_i32::<LE>()?,
-            maximum_integral_digits: reader.read_i32::<LE>()?,
-            minimum_fractional_digits: reader.read_i32::<LE>()?,
-            maximum_fractional_digits: reader.read_i32::<LE>()?,
+            always_sign: ar.read_u32::<LE>()? != 0,
+            use_grouping: ar.read_u32::<LE>()? != 0,
+            rounding_mode: ar.read_i8()?,
+            minimum_integral_digits: ar.read_i32::<LE>()?,
+            maximum_integral_digits: ar.read_i32::<LE>()?,
+            minimum_fractional_digits: ar.read_i32::<LE>()?,
+            maximum_fractional_digits: ar.read_i32::<LE>()?,
         })
     }
 }
 impl FNumberFormattingOptions {
-    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
-        writer.write_u32::<LE>(self.always_sign as u32)?;
-        writer.write_u32::<LE>(self.use_grouping as u32)?;
-        writer.write_i8(self.rounding_mode)?;
-        writer.write_i32::<LE>(self.minimum_integral_digits)?;
-        writer.write_i32::<LE>(self.maximum_integral_digits)?;
-        writer.write_i32::<LE>(self.minimum_fractional_digits)?;
-        writer.write_i32::<LE>(self.maximum_fractional_digits)?;
+    fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
+        ar.write_u32::<LE>(self.always_sign as u32)?;
+        ar.write_u32::<LE>(self.use_grouping as u32)?;
+        ar.write_i8(self.rounding_mode)?;
+        ar.write_i32::<LE>(self.minimum_integral_digits)?;
+        ar.write_i32::<LE>(self.maximum_integral_digits)?;
+        ar.write_i32::<LE>(self.minimum_fractional_digits)?;
+        ar.write_i32::<LE>(self.maximum_fractional_digits)?;
         Ok(())
     }
 }
@@ -2305,42 +2305,41 @@ pub enum TextVariant {
 
 impl Text {
     #[instrument(name = "Text_read", skip_all)]
-    fn read<R: Read + Seek>(reader: &mut Context<R>) -> Result<Self> {
-        let flags = reader.read_u32::<LE>()?;
-        let text_history_type = reader.read_i8()?;
+    fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
+        let flags = ar.read_u32::<LE>()?;
+        let text_history_type = ar.read_i8()?;
         let variant = match text_history_type {
             -0x1 => Ok(TextVariant::None {
-                culture_invariant: (reader.read_u32::<LE>()? != 0) // bHasCultureInvariantString
-                    .then(|| read_string(reader))
+                culture_invariant: (ar.read_u32::<LE>()? != 0) // bHasCultureInvariantString
+                    .then(|| read_string(ar))
                     .transpose()?,
             }),
             0x0 => Ok(TextVariant::Base {
-                namespace: read_string_trailing(reader)?,
-                key: read_string(reader)?,
-                source_string: read_string(reader)?,
+                namespace: read_string_trailing(ar)?,
+                key: read_string(ar)?,
+                source_string: read_string(ar)?,
             }),
             0x3 => Ok(TextVariant::ArgumentFormat {
-                format_text: std::boxed::Box::new(Text::read(reader)?),
-                arguments: read_array(reader.read_u32::<LE>()?, reader, FFormatArgumentData::read)?,
+                format_text: std::boxed::Box::new(Text::read(ar)?),
+                arguments: read_array(ar.read_u32::<LE>()?, ar, FFormatArgumentData::read)?,
             }),
             0x4 => Ok(TextVariant::AsNumber {
-                source_value: FFormatArgumentValue::read(reader)?,
-                format_options:
-                    (reader.read_u32::<LE>()? != 0) // bHasFormatOptions
-                        .then(|| FNumberFormattingOptions::read(reader))
-                        .transpose()?,
-                culture_name: read_string(reader)?,
+                source_value: FFormatArgumentValue::read(ar)?,
+                format_options: (ar.read_u32::<LE>()? != 0) // bHasFormatOptions
+                    .then(|| FNumberFormattingOptions::read(ar))
+                    .transpose()?,
+                culture_name: read_string(ar)?,
             }),
             0x7 => Ok(TextVariant::AsDate {
-                source_date_time: reader.read_u64::<LE>()?,
-                date_style: reader.read_i8()?,
-                time_zone: read_string(reader)?,
-                culture_name: read_string(reader)?,
+                source_date_time: ar.read_u64::<LE>()?,
+                date_style: ar.read_i8()?,
+                time_zone: read_string(ar)?,
+                culture_name: read_string(ar)?,
             }),
             0xb => Ok({
                 TextVariant::StringTableEntry {
-                    table: read_string(reader)?,
-                    key: read_string(reader)?,
+                    table: read_string(ar)?,
+                    key: read_string(ar)?,
                 }
             }),
             _ => Err(Error::Other(format!(
@@ -2351,14 +2350,14 @@ impl Text {
     }
 }
 impl Text {
-    fn write<W: Write + Seek>(&self, writer: &mut Context<W>) -> Result<()> {
-        writer.write_u32::<LE>(self.flags)?;
+    fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
+        ar.write_u32::<LE>(self.flags)?;
         match &self.variant {
             TextVariant::None { culture_invariant } => {
-                writer.write_i8(-0x1)?;
-                writer.write_u32::<LE>(culture_invariant.is_some() as u32)?;
+                ar.write_i8(-0x1)?;
+                ar.write_u32::<LE>(culture_invariant.is_some() as u32)?;
                 if let Some(culture_invariant) = culture_invariant {
-                    write_string(writer, culture_invariant)?;
+                    write_string(ar, culture_invariant)?;
                 }
             }
             TextVariant::Base {
@@ -2366,23 +2365,23 @@ impl Text {
                 key,
                 source_string,
             } => {
-                writer.write_i8(0x0)?;
+                ar.write_i8(0x0)?;
                 // This particular string sometimes includes the trailing null byte and sometimes
                 // does not. To preserve byte-for-byte equality we save the trailing bytes (null or
                 // not) to the JSON so they can be retored later.
-                write_string_trailing(writer, &namespace.0, Some(&namespace.1))?;
-                write_string(writer, key)?;
-                write_string(writer, source_string)?;
+                write_string_trailing(ar, &namespace.0, Some(&namespace.1))?;
+                write_string(ar, key)?;
+                write_string(ar, source_string)?;
             }
             TextVariant::ArgumentFormat {
                 format_text,
                 arguments,
             } => {
-                writer.write_i8(0x3)?;
-                format_text.write(writer)?;
-                writer.write_u32::<LE>(arguments.len() as u32)?;
+                ar.write_i8(0x3)?;
+                format_text.write(ar)?;
+                ar.write_u32::<LE>(arguments.len() as u32)?;
                 for a in arguments {
-                    a.write(writer)?;
+                    a.write(ar)?;
                 }
             }
             TextVariant::AsNumber {
@@ -2390,13 +2389,13 @@ impl Text {
                 format_options,
                 culture_name,
             } => {
-                writer.write_i8(0x4)?;
-                source_value.write(writer)?;
-                writer.write_u32::<LE>(format_options.is_some() as u32)?;
+                ar.write_i8(0x4)?;
+                source_value.write(ar)?;
+                ar.write_u32::<LE>(format_options.is_some() as u32)?;
                 if let Some(format_options) = format_options {
-                    format_options.write(writer)?;
+                    format_options.write(ar)?;
                 }
-                write_string(writer, culture_name)?;
+                write_string(ar, culture_name)?;
             }
             TextVariant::AsDate {
                 source_date_time,
@@ -2404,16 +2403,16 @@ impl Text {
                 time_zone,
                 culture_name,
             } => {
-                writer.write_i8(0x7)?;
-                writer.write_u64::<LE>(*source_date_time)?;
-                writer.write_i8(*date_style)?;
-                write_string(writer, time_zone)?;
-                write_string(writer, culture_name)?;
+                ar.write_i8(0x7)?;
+                ar.write_u64::<LE>(*source_date_time)?;
+                ar.write_i8(*date_style)?;
+                write_string(ar, time_zone)?;
+                write_string(ar, culture_name)?;
             }
             TextVariant::StringTableEntry { table, key } => {
-                writer.write_i8(0xb)?;
-                write_string(writer, table)?;
-                write_string(writer, key)?;
+                ar.write_i8(0xb)?;
+                write_string(ar, table)?;
+                write_string(ar, key)?;
             }
         }
         Ok(())
