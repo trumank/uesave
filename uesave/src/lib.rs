@@ -396,7 +396,7 @@ fn write_properties_none_terminated<A: ArchiveWriter>(
     for p in properties {
         write_property(p, ar)?;
     }
-    write_string(ar, "None")?;
+    ar.write_string("None")?;
     Ok(())
 }
 
@@ -741,7 +741,7 @@ impl PropertyTagFull<'_> {
     }
     #[instrument(name = "PropertyTag_read", skip_all)]
     fn read<A: ArchiveReader>(ar: &mut A) -> Result<Option<Self>> {
-        let name = read_string(ar)?;
+        let name = ar.read_string()?;
         if name == "None" {
             return Ok(None);
         }
@@ -755,7 +755,7 @@ impl PropertyTagFull<'_> {
             }
             fn read_node<A: ArchiveReader>(ar: &mut A) -> Result<Node> {
                 Ok(Node {
-                    name: read_string(ar)?,
+                    name: ar.read_string()?,
                     inner: read_array(ar.read_u32::<LE>()?, ar, read_node)?,
                 })
             }
@@ -870,11 +870,11 @@ impl PropertyTagFull<'_> {
                         PropertyTagDataFull::Other(type_)
                     }
                     PropertyType::ByteProperty => {
-                        let enum_type = read_string(ar)?;
+                        let enum_type = ar.read_string()?;
                         PropertyTagDataFull::Byte((enum_type != "None").then_some(enum_type))
                     }
                     PropertyType::EnumProperty => {
-                        let enum_type = read_string(ar)?;
+                        let enum_type = ar.read_string()?;
                         PropertyTagDataFull::Enum(enum_type, None)
                     }
                     PropertyType::ArrayProperty => {
@@ -952,7 +952,7 @@ impl PropertyTagFull<'_> {
         }
     }
     fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
-        write_string(ar, &self.name)?;
+        ar.write_string(&self.name)?;
 
         if ar.version().property_tag() {
             fn write_node<A: ArchiveWriter>(
@@ -960,7 +960,7 @@ impl PropertyTagFull<'_> {
                 name: &str,
                 inner_count: u32,
             ) -> Result<()> {
-                write_string(ar, name)?;
+                ar.write_string(name)?;
                 ar.write_u32::<LE>(inner_count)?;
                 Ok(())
             }
@@ -1062,10 +1062,10 @@ impl PropertyTagFull<'_> {
                     value_type.basic_type().write(ar)?;
                 }
                 PropertyTagDataFull::Byte(enum_type) => {
-                    write_string(ar, enum_type.as_deref().unwrap_or("None"))?;
+                    ar.write_string(enum_type.as_deref().unwrap_or("None"))?;
                 }
                 PropertyTagDataFull::Enum(enum_type, _) => {
-                    write_string(ar, enum_type)?;
+                    ar.write_string(enum_type)?;
                 }
                 PropertyTagDataFull::Bool(value) => {
                     ar.write_u8(*value as u8)?;
@@ -1144,7 +1144,7 @@ impl PropertyType {
     }
     #[instrument(name = "PropertyType_read", skip_all)]
     fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
-        Self::try_from(&read_string(ar)?)
+        Self::try_from(&ar.read_string()?)
     }
     fn try_from(name: &str) -> Result<Self> {
         match name {
@@ -1179,7 +1179,7 @@ impl PropertyType {
         }
     }
     fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
-        write_string(ar, self.get_name())?;
+        ar.write_string(self.get_name())?;
         Ok(())
     }
 }
@@ -1319,10 +1319,10 @@ impl StructType {
     }
     #[instrument(name = "StructType_read", skip_all)]
     fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
-        Ok(read_string(ar)?.into())
+        Ok(ar.read_string()?.into())
     }
     fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
-        write_string(ar, self.as_str())?;
+        ar.write_string(self.as_str())?;
         Ok(())
     }
     fn raw(&self) -> bool {
@@ -1603,16 +1603,16 @@ impl FieldPath {
     #[instrument(name = "FieldPath_read", skip_all)]
     fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
         Ok(Self {
-            path: read_array(ar.read_u32::<LE>()?, ar, read_string)?,
-            owner: read_string(ar)?,
+            path: read_array(ar.read_u32::<LE>()?, ar, |ar| ar.read_string())?,
+            owner: ar.read_string()?,
         })
     }
     fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
         ar.write_u32::<LE>(self.path.len() as u32)?;
         for p in &self.path {
-            write_string(ar, p)?;
+            ar.write_string(p)?;
         }
-        write_string(ar, &self.owner)?;
+        ar.write_string(&self.owner)?;
         Ok(())
     }
 }
@@ -1626,13 +1626,13 @@ impl Delegate {
     #[instrument(name = "Delegate_read", skip_all)]
     fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
         Ok(Self {
-            name: read_string(ar)?,
-            path: read_string(ar)?,
+            name: ar.read_string()?,
+            path: ar.read_string()?,
         })
     }
     fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
-        write_string(ar, &self.name)?;
-        write_string(ar, &self.path)?;
+        ar.write_string(&self.name)?;
+        ar.write_string(&self.path)?;
         Ok(())
     }
 }
@@ -1960,14 +1960,14 @@ impl SoftObjectPath {
     fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
         Ok(if ar.version().remove_asset_path_fnames() {
             Self::New {
-                asset_path_name: read_string(ar)?,
-                package_name: read_string(ar)?,
-                asset_name: read_string_trailing(ar)?,
+                asset_path_name: ar.read_string()?,
+                package_name: ar.read_string()?,
+                asset_name: ar.read_string_trailing()?,
             }
         } else {
             Self::Old {
-                asset_path_name: read_string(ar)?,
-                sub_path_string: read_string(ar)?,
+                asset_path_name: ar.read_string()?,
+                sub_path_string: ar.read_string()?,
             }
         })
     }
@@ -1977,17 +1977,17 @@ impl SoftObjectPath {
                 asset_path_name,
                 sub_path_string,
             } => {
-                write_string(ar, asset_path_name)?;
-                write_string(ar, sub_path_string)?;
+                ar.write_string(asset_path_name)?;
+                ar.write_string(sub_path_string)?;
             }
             Self::New {
                 asset_path_name,
                 package_name,
                 asset_name: (asset_name, trailing),
             } => {
-                write_string(ar, asset_path_name)?;
-                write_string(ar, package_name)?;
-                write_string_trailing(ar, asset_name, Some(trailing))?;
+                ar.write_string(asset_path_name)?;
+                ar.write_string(package_name)?;
+                ar.write_string_trailing(asset_name, Some(trailing))?;
             }
         }
         Ok(())
@@ -2002,11 +2002,11 @@ impl GameplayTag {
     #[instrument(name = "GameplayTag_read", skip_all)]
     fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
         Ok(Self {
-            name: read_string(ar)?,
+            name: ar.read_string()?,
         })
     }
     fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
-        write_string(ar, &self.name)?;
+        ar.write_string(&self.name)?;
         Ok(())
     }
 }
@@ -2048,8 +2048,8 @@ impl UniqueNetIdRepl {
         let inner = if let Ok(size) = size.try_into() {
             Some(UniqueNetIdReplInner {
                 size,
-                type_: read_string(ar)?,
-                contents: read_string(ar)?,
+                type_: ar.read_string()?,
+                contents: ar.read_string()?,
             })
         } else {
             None
@@ -2060,8 +2060,8 @@ impl UniqueNetIdRepl {
         match &self.inner {
             Some(inner) => {
                 ar.write_u32::<LE>(inner.size.into())?;
-                write_string(ar, &inner.type_)?;
-                write_string(ar, &inner.contents)?;
+                ar.write_string(&inner.type_)?;
+                ar.write_string(&inner.contents)?;
             }
             None => ar.write_u32::<LE>(0)?,
         }
@@ -2078,14 +2078,14 @@ impl FFormatArgumentData {
     #[instrument(name = "FFormatArgumentData_read", skip_all)]
     fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
         Ok(Self {
-            name: read_string(ar)?,
+            name: ar.read_string()?,
             value: FFormatArgumentDataValue::read(ar)?,
         })
     }
 }
 impl FFormatArgumentData {
     fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
-        write_string(ar, &self.name)?;
+        ar.write_string(&self.name)?;
         self.value.write(ar)?;
         Ok(())
     }
@@ -2297,13 +2297,13 @@ impl Text {
         let variant = match text_history_type {
             -0x1 => Ok(TextVariant::None {
                 culture_invariant: (ar.read_u32::<LE>()? != 0) // bHasCultureInvariantString
-                    .then(|| read_string(ar))
+                    .then(|| ar.read_string())
                     .transpose()?,
             }),
             0x0 => Ok(TextVariant::Base {
-                namespace: read_string_trailing(ar)?,
-                key: read_string(ar)?,
-                source_string: read_string(ar)?,
+                namespace: ar.read_string_trailing()?,
+                key: ar.read_string()?,
+                source_string: ar.read_string()?,
             }),
             0x3 => Ok(TextVariant::ArgumentFormat {
                 format_text: std::boxed::Box::new(Text::read(ar)?),
@@ -2314,18 +2314,18 @@ impl Text {
                 format_options: (ar.read_u32::<LE>()? != 0) // bHasFormatOptions
                     .then(|| FNumberFormattingOptions::read(ar))
                     .transpose()?,
-                culture_name: read_string(ar)?,
+                culture_name: ar.read_string()?,
             }),
             0x7 => Ok(TextVariant::AsDate {
                 source_date_time: ar.read_u64::<LE>()?,
                 date_style: ar.read_i8()?,
-                time_zone: read_string(ar)?,
-                culture_name: read_string(ar)?,
+                time_zone: ar.read_string()?,
+                culture_name: ar.read_string()?,
             }),
             0xb => Ok({
                 TextVariant::StringTableEntry {
-                    table: read_string(ar)?,
-                    key: read_string(ar)?,
+                    table: ar.read_string()?,
+                    key: ar.read_string()?,
                 }
             }),
             _ => Err(Error::Other(format!(
@@ -2343,7 +2343,7 @@ impl Text {
                 ar.write_i8(-0x1)?;
                 ar.write_u32::<LE>(culture_invariant.is_some() as u32)?;
                 if let Some(culture_invariant) = culture_invariant {
-                    write_string(ar, culture_invariant)?;
+                    ar.write_string(culture_invariant)?;
                 }
             }
             TextVariant::Base {
@@ -2355,9 +2355,9 @@ impl Text {
                 // This particular string sometimes includes the trailing null byte and sometimes
                 // does not. To preserve byte-for-byte equality we save the trailing bytes (null or
                 // not) to the JSON so they can be retored later.
-                write_string_trailing(ar, &namespace.0, Some(&namespace.1))?;
-                write_string(ar, key)?;
-                write_string(ar, source_string)?;
+                ar.write_string_trailing(&namespace.0, Some(&namespace.1))?;
+                ar.write_string(key)?;
+                ar.write_string(source_string)?;
             }
             TextVariant::ArgumentFormat {
                 format_text,
@@ -2381,7 +2381,7 @@ impl Text {
                 if let Some(format_options) = format_options {
                     format_options.write(ar)?;
                 }
-                write_string(ar, culture_name)?;
+                ar.write_string(culture_name)?;
             }
             TextVariant::AsDate {
                 source_date_time,
@@ -2392,13 +2392,13 @@ impl Text {
                 ar.write_i8(0x7)?;
                 ar.write_u64::<LE>(*source_date_time)?;
                 ar.write_i8(*date_style)?;
-                write_string(ar, time_zone)?;
-                write_string(ar, culture_name)?;
+                ar.write_string(time_zone)?;
+                ar.write_string(culture_name)?;
             }
             TextVariant::StringTableEntry { table, key } => {
                 ar.write_i8(0xb)?;
-                write_string(ar, table)?;
-                write_string(ar, key)?;
+                ar.write_string(table)?;
+                ar.write_string(key)?;
             }
         }
         Ok(())
@@ -2514,8 +2514,8 @@ impl PropertyValue {
             }
             PropertyTagDataFull::Set { .. } => unreachable!(),
             PropertyTagDataFull::Map { .. } => unreachable!(),
-            PropertyTagDataFull::Byte(_) => PropertyValue::Byte(Byte::Label(read_string(ar)?)),
-            PropertyTagDataFull::Enum(_, _) => PropertyValue::Enum(read_string(ar)?),
+            PropertyTagDataFull::Byte(_) => PropertyValue::Byte(Byte::Label(ar.read_string()?)),
+            PropertyTagDataFull::Enum(_, _) => PropertyValue::Enum(ar.read_string()?),
             PropertyTagDataFull::Bool(_) => PropertyValue::Bool(ar.read_u8()? > 0),
             PropertyTagDataFull::Other(property_type) => match property_type {
                 PropertyType::IntProperty => PropertyValue::Int(ar.read_i32::<LE>()?),
@@ -2526,12 +2526,12 @@ impl PropertyValue {
                 PropertyType::UInt32Property => PropertyValue::UInt32(ar.read_u32::<LE>()?),
                 PropertyType::FloatProperty => PropertyValue::Float(ar.read_f32::<LE>()?.into()),
                 PropertyType::DoubleProperty => PropertyValue::Double(ar.read_f64::<LE>()?.into()),
-                PropertyType::NameProperty => PropertyValue::Name(read_string(ar)?),
-                PropertyType::StrProperty => PropertyValue::Str(read_string(ar)?),
+                PropertyType::NameProperty => PropertyValue::Name(ar.read_string()?),
+                PropertyType::StrProperty => PropertyValue::Str(ar.read_string()?),
                 PropertyType::SoftObjectProperty => {
                     PropertyValue::SoftObject(SoftObjectPath::read(ar)?)
                 }
-                PropertyType::ObjectProperty => PropertyValue::Object(read_string(ar)?),
+                PropertyType::ObjectProperty => PropertyValue::Object(ar.read_string()?),
                 _ => return Err(Error::Other(format!("unimplemented property {t:?}"))),
             },
         })
@@ -2547,16 +2547,16 @@ impl PropertyValue {
             PropertyValue::Float(v) => ar.write_f32::<LE>((*v).into())?,
             PropertyValue::Double(v) => ar.write_f64::<LE>((*v).into())?,
             PropertyValue::Bool(v) => ar.write_u8(u8::from(*v))?,
-            PropertyValue::Name(v) => write_string(ar, v)?,
-            PropertyValue::Str(v) => write_string(ar, v)?,
+            PropertyValue::Name(v) => ar.write_string(v)?,
+            PropertyValue::Str(v) => ar.write_string(v)?,
             PropertyValue::SoftObject(v) => v.write(ar)?,
             PropertyValue::SoftObjectPath(v) => v.write(ar)?,
-            PropertyValue::Object(v) => write_string(ar, v)?,
+            PropertyValue::Object(v) => ar.write_string(v)?,
             PropertyValue::Byte(v) => match v {
                 Byte::Byte(b) => ar.write_u8(*b)?,
-                Byte::Label(l) => write_string(ar, l)?,
+                Byte::Label(l) => ar.write_string(l)?,
             },
-            PropertyValue::Enum(v) => write_string(ar, v)?,
+            PropertyValue::Enum(v) => ar.write_string(v)?,
             PropertyValue::Struct(v) => v.write(ar)?,
         };
         Ok(())
@@ -2651,17 +2651,25 @@ impl ValueVec {
                         |r| Ok(r.read_u8()?),
                     )?))
                 } else {
-                    ValueVec::Byte(ByteArray::Label(read_array(count, ar, |r| read_string(r))?))
+                    ValueVec::Byte(ByteArray::Label(read_array(count, ar, |r| {
+                        r.read_string()
+                    })?))
                 }
             }
-            PropertyType::EnumProperty => ValueVec::Enum(read_array(count, ar, read_string)?),
-            PropertyType::StrProperty => ValueVec::Str(read_array(count, ar, read_string)?),
+            PropertyType::EnumProperty => {
+                ValueVec::Enum(read_array(count, ar, |r| r.read_string())?)
+            }
+            PropertyType::StrProperty => ValueVec::Str(read_array(count, ar, |r| r.read_string())?),
             PropertyType::TextProperty => ValueVec::Text(read_array(count, ar, Text::read)?),
             PropertyType::SoftObjectProperty => ValueVec::SoftObject(read_array(count, ar, |r| {
-                Ok((read_string(r)?, read_string(r)?))
+                Ok((r.read_string()?, r.read_string()?))
             })?),
-            PropertyType::NameProperty => ValueVec::Name(read_array(count, ar, read_string)?),
-            PropertyType::ObjectProperty => ValueVec::Object(read_array(count, ar, read_string)?),
+            PropertyType::NameProperty => {
+                ValueVec::Name(read_array(count, ar, |r| r.read_string())?)
+            }
+            PropertyType::ObjectProperty => {
+                ValueVec::Object(read_array(count, ar, |r| r.read_string())?)
+            }
             _ => return Err(Error::UnknownVecType(format!("{t:?}"))),
         })
     }
@@ -2743,20 +2751,20 @@ impl ValueVec {
                 ByteArray::Label(l) => {
                     ar.write_u32::<LE>(l.len() as u32)?;
                     for l in l {
-                        write_string(ar, l)?;
+                        ar.write_string(l)?;
                     }
                 }
             },
             ValueVec::Enum(v) => {
                 ar.write_u32::<LE>(v.len() as u32)?;
                 for i in v {
-                    write_string(ar, i)?;
+                    ar.write_string(i)?;
                 }
             }
             ValueVec::Str(v) | ValueVec::Object(v) | ValueVec::Name(v) => {
                 ar.write_u32::<LE>(v.len() as u32)?;
                 for i in v {
-                    write_string(ar, i)?;
+                    ar.write_string(i)?;
                 }
             }
             ValueVec::Text(v) => {
@@ -2768,8 +2776,8 @@ impl ValueVec {
             ValueVec::SoftObject(v) => {
                 ar.write_u32::<LE>(v.len() as u32)?;
                 for (a, b) in v {
-                    write_string(ar, a)?;
-                    write_string(ar, b)?;
+                    ar.write_string(a)?;
+                    ar.write_string(b)?;
                 }
             }
             ValueVec::Box(v) => {
@@ -2837,7 +2845,7 @@ impl ValueArray {
                 ar.write_u32::<LE>(value.len() as u32)?;
 
                 if !ar.version().property_tag() && ar.version().array_inner_tag() {
-                    write_string(ar, &tag.name)?;
+                    ar.write_string(&tag.name)?;
                     type_.write(ar)?;
 
                     // Write placeholder size
@@ -2991,11 +2999,11 @@ impl Property {
                 let value = if enum_type.is_none() {
                     Byte::Byte(ar.read_u8()?)
                 } else {
-                    Byte::Label(read_string(ar)?)
+                    Byte::Label(ar.read_string()?)
                 };
                 PropertyInner::Byte(value)
             }
-            PropertyTagDataFull::Enum { .. } => PropertyInner::Enum(read_string(ar)?),
+            PropertyTagDataFull::Enum { .. } => PropertyInner::Enum(ar.read_string()?),
             PropertyTagDataFull::Set { key_type } => {
                 ar.read_u32::<LE>()?;
                 PropertyInner::Set(ValueSet::read(ar, key_type, tag.size - 8)?)
@@ -3038,13 +3046,13 @@ impl Property {
                 PropertyType::UInt64Property => PropertyInner::UInt64(ar.read_u64::<LE>()?),
                 PropertyType::FloatProperty => PropertyInner::Float(ar.read_f32::<LE>()?.into()),
                 PropertyType::DoubleProperty => PropertyInner::Double(ar.read_f64::<LE>()?.into()),
-                PropertyType::NameProperty => PropertyInner::Name(read_string(ar)?),
-                PropertyType::StrProperty => PropertyInner::Str(read_string(ar)?),
+                PropertyType::NameProperty => PropertyInner::Name(ar.read_string()?),
+                PropertyType::StrProperty => PropertyInner::Str(ar.read_string()?),
                 PropertyType::FieldPathProperty => PropertyInner::FieldPath(FieldPath::read(ar)?),
                 PropertyType::SoftObjectProperty => {
                     PropertyInner::SoftObject(SoftObjectPath::read(ar)?)
                 }
-                PropertyType::ObjectProperty => PropertyInner::Object(read_string(ar)?),
+                PropertyType::ObjectProperty => PropertyInner::Object(ar.read_string()?),
                 PropertyType::TextProperty => PropertyInner::Text(Text::read(ar)?),
                 PropertyType::DelegateProperty => PropertyInner::Delegate(Delegate::read(ar)?),
                 PropertyType::MulticastDelegateProperty => {
@@ -3097,17 +3105,17 @@ impl Property {
                     ar.write_u8(*b)?;
                 }
                 Byte::Label(l) => {
-                    write_string(ar, l)?;
+                    ar.write_string(l)?;
                 }
             },
             PropertyInner::Enum(value) => {
-                write_string(ar, value)?;
+                ar.write_string(value)?;
             }
             PropertyInner::Name(value) => {
-                write_string(ar, value)?;
+                ar.write_string(value)?;
             }
             PropertyInner::Str(value) => {
-                write_string(ar, value)?;
+                ar.write_string(value)?;
             }
             PropertyInner::FieldPath(value) => {
                 value.write(ar)?;
@@ -3116,7 +3124,7 @@ impl Property {
                 value.write(ar)?;
             }
             PropertyInner::Object(value) => {
-                write_string(ar, value)?;
+                ar.write_string(value)?;
             }
             PropertyInner::Text(value) => {
                 value.write(ar)?;
@@ -3252,7 +3260,7 @@ impl Header {
         let engine_version_minor = ar.read_u16::<LE>()?;
         let engine_version_patch = ar.read_u16::<LE>()?;
         let engine_version_build = ar.read_u32::<LE>()?;
-        let engine_version = read_string(ar)?;
+        let engine_version = ar.read_string()?;
         let custom_version = if (engine_version_major, engine_version_minor) >= (4, 12) {
             Some((
                 ar.read_u32::<LE>()?,
@@ -3286,7 +3294,7 @@ impl Header {
         ar.write_u16::<LE>(self.engine_version_minor)?;
         ar.write_u16::<LE>(self.engine_version_patch)?;
         ar.write_u32::<LE>(self.engine_version_build)?;
-        write_string(ar, &self.engine_version)?;
+        ar.write_string(&self.engine_version)?;
         if let Some((custom_format_version, custom_format)) = &self.custom_version {
             ar.write_u32::<LE>(*custom_format_version)?;
             ar.write_u32::<LE>(custom_format.len() as u32)?;
@@ -3307,7 +3315,7 @@ pub struct Root {
 impl Root {
     #[instrument(name = "Root_read", skip_all)]
     fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
-        let save_game_type = read_string(ar)?;
+        let save_game_type = ar.read_string()?;
         if ar.version().property_tag() {
             ar.read_u8()?;
         }
@@ -3318,7 +3326,7 @@ impl Root {
         })
     }
     fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
-        write_string(ar, &self.save_game_type)?;
+        ar.write_string(&self.save_game_type)?;
         if ar.version().property_tag() {
             ar.write_u8(0)?;
         }
