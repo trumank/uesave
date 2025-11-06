@@ -2507,7 +2507,7 @@ pub enum ByteArray {
 
 #[derive(Debug, PartialEq, Serialize)]
 #[serde(untagged)]
-#[serde(bound(serialize = "T::ObjectRef: Serialize"))]
+#[serde(bound(serialize = "T::ObjectRef: Serialize, T::SoftObjectPath: Serialize"))]
 pub enum PropertyValue<T: ArchiveType = SaveGameArchiveType> {
     Int(Int),
     Int8(Int8),
@@ -2522,15 +2522,15 @@ pub enum PropertyValue<T: ArchiveType = SaveGameArchiveType> {
     Enum(Enum),
     Name(String),
     Str(String),
-    SoftObject(SoftObjectPath),
-    SoftObjectPath(SoftObjectPath),
+    SoftObject(T::SoftObjectPath),
+    SoftObjectPath(T::SoftObjectPath),
     Object(T::ObjectRef),
     Struct(StructValue<T>),
 }
 
 #[derive(Debug, PartialEq, Serialize)]
 #[serde(untagged)]
-#[serde(bound(serialize = "T::ObjectRef: Serialize"))]
+#[serde(bound(serialize = "T::ObjectRef: Serialize, T::SoftObjectPath: Serialize"))]
 pub enum StructValue<T: ArchiveType = SaveGameArchiveType> {
     Guid(FGuid),
     DateTime(DateTime),
@@ -2544,7 +2544,7 @@ pub enum StructValue<T: ArchiveType = SaveGameArchiveType> {
     LinearColor(LinearColor),
     Color(Color),
     Rotator(Rotator),
-    SoftObjectPath(SoftObjectPath),
+    SoftObjectPath(T::SoftObjectPath),
     GameplayTagContainer(GameplayTagContainer),
     UniqueNetIdRepl(UniqueNetIdRepl),
     RichCurveKey(FRichCurveKey),
@@ -2557,7 +2557,7 @@ pub enum StructValue<T: ArchiveType = SaveGameArchiveType> {
 /// Vectorized properties to avoid storing the variant with each value
 #[derive(Debug, PartialEq, Serialize)]
 #[serde(untagged)]
-#[serde(bound(serialize = "T::ObjectRef: Serialize"))]
+#[serde(bound(serialize = "T::ObjectRef: Serialize, T::SoftObjectPath: Serialize"))]
 pub enum ValueVec<T: ArchiveType = SaveGameArchiveType> {
     Int8(Vec<Int8>),
     Int16(Vec<Int16>),
@@ -2574,7 +2574,7 @@ pub enum ValueVec<T: ArchiveType = SaveGameArchiveType> {
     Enum(Vec<Enum>),
     Str(Vec<String>),
     Text(Vec<Text>),
-    SoftObject(Vec<(String, String)>),
+    SoftObject(Vec<T::SoftObjectPath>),
     Name(Vec<String>),
     Object(Vec<T::ObjectRef>),
     Box(Vec<Box>),
@@ -2609,7 +2609,7 @@ impl<T: ArchiveType> PropertyValue<T> {
                 PropertyType::NameProperty => PropertyValue::Name(ar.read_string()?),
                 PropertyType::StrProperty => PropertyValue::Str(ar.read_string()?),
                 PropertyType::SoftObjectProperty => {
-                    PropertyValue::SoftObject(SoftObjectPath::read(ar)?)
+                    PropertyValue::SoftObject(ar.read_soft_object_path()?)
                 }
                 PropertyType::ObjectProperty => PropertyValue::Object(ar.read_object_ref()?),
                 _ => return Err(Error::Other(format!("unimplemented property {t:?}"))),
@@ -2629,8 +2629,8 @@ impl<T: ArchiveType> PropertyValue<T> {
             PropertyValue::Bool(v) => ar.write_u8(u8::from(*v))?,
             PropertyValue::Name(v) => ar.write_string(v)?,
             PropertyValue::Str(v) => ar.write_string(v)?,
-            PropertyValue::SoftObject(v) => v.write(ar)?,
-            PropertyValue::SoftObjectPath(v) => v.write(ar)?,
+            PropertyValue::SoftObject(v) => ar.write_soft_object_path(v)?,
+            PropertyValue::SoftObjectPath(v) => ar.write_soft_object_path(v)?,
             PropertyValue::Object(v) => ar.write_object_ref(v)?,
             PropertyValue::Byte(v) => match v {
                 Byte::Byte(b) => ar.write_u8(*b)?,
@@ -2661,7 +2661,7 @@ impl<T: ArchiveType> StructValue<T> {
             StructType::LinearColor => StructValue::LinearColor(LinearColor::read(ar)?),
             StructType::Color => StructValue::Color(Color::read(ar)?),
             StructType::Rotator => StructValue::Rotator(Rotator::read(ar)?),
-            StructType::SoftObjectPath => StructValue::SoftObjectPath(SoftObjectPath::read(ar)?),
+            StructType::SoftObjectPath => StructValue::SoftObjectPath(ar.read_soft_object_path()?),
             StructType::GameplayTagContainer => {
                 StructValue::GameplayTagContainer(GameplayTagContainer::read(ar)?)
             }
@@ -2685,7 +2685,7 @@ impl<T: ArchiveType> StructValue<T> {
             StructValue::LinearColor(v) => v.write(ar)?,
             StructValue::Color(v) => v.write(ar)?,
             StructValue::Rotator(v) => v.write(ar)?,
-            StructValue::SoftObjectPath(v) => v.write(ar)?,
+            StructValue::SoftObjectPath(v) => ar.write_soft_object_path(v)?,
             StructValue::GameplayTagContainer(v) => v.write(ar)?,
             StructValue::UniqueNetIdRepl(v) => v.write(ar)?,
             StructValue::RichCurveKey(v) => v.write(ar)?,
@@ -2746,9 +2746,9 @@ impl<T: ArchiveType> ValueVec<T> {
             }
             PropertyType::StrProperty => ValueVec::Str(read_array(count, ar, |r| r.read_string())?),
             PropertyType::TextProperty => ValueVec::Text(read_array(count, ar, Text::read)?),
-            PropertyType::SoftObjectProperty => ValueVec::SoftObject(read_array(count, ar, |r| {
-                Ok((r.read_string()?, r.read_string()?))
-            })?),
+            PropertyType::SoftObjectProperty => {
+                ValueVec::SoftObject(read_array(count, ar, |r| r.read_soft_object_path())?)
+            }
             PropertyType::NameProperty => {
                 ValueVec::Name(read_array(count, ar, |r| r.read_string())?)
             }
@@ -2866,9 +2866,8 @@ impl<T: ArchiveType> ValueVec<T> {
             }
             ValueVec::SoftObject(v) => {
                 ar.write_u32::<LE>(v.len() as u32)?;
-                for (a, b) in v {
-                    ar.write_string(a)?;
-                    ar.write_string(b)?;
+                for i in v {
+                    ar.write_soft_object_path(i)?;
                 }
             }
             ValueVec::Box(v) => {
@@ -3015,6 +3014,7 @@ impl<T: ArchiveType> ValueVec<T> {
 /// Property schemas (tags) are stored separately in [`PropertySchemas`]
 #[derive(Debug, PartialEq, Serialize)]
 #[serde(untagged)]
+#[serde(bound(serialize = "T::ObjectRef: Serialize, T::SoftObjectPath: Serialize"))]
 pub enum Property<T: ArchiveType = SaveGameArchiveType> {
     Int8(Int8),
     Int16(Int16),
@@ -3031,7 +3031,7 @@ pub enum Property<T: ArchiveType = SaveGameArchiveType> {
     Enum(Enum),
     Str(String),
     FieldPath(FieldPath),
-    SoftObject(SoftObjectPath),
+    SoftObject(T::SoftObjectPath),
     Name(String),
     Object(T::ObjectRef),
     Text(Text),
@@ -3145,7 +3145,7 @@ impl<T: ArchiveType> Property<T> {
                     PropertyType::StrProperty => Property::Str(ar.read_string()?),
                     PropertyType::FieldPathProperty => Property::FieldPath(FieldPath::read(ar)?),
                     PropertyType::SoftObjectProperty => {
-                        Property::SoftObject(SoftObjectPath::read(ar)?)
+                        Property::SoftObject(ar.read_soft_object_path()?)
                     }
                     PropertyType::ObjectProperty => Property::Object(ar.read_object_ref()?),
                     PropertyType::TextProperty => Property::Text(Text::read(ar)?),
@@ -3228,7 +3228,7 @@ impl<T: ArchiveType> Property<T> {
                 value.write(ar)?;
             }
             Property::SoftObject(value) => {
-                value.write(ar)?;
+                ar.write_soft_object_path(value)?;
             }
             Property::Object(value) => {
                 ar.write_object_ref(value)?;

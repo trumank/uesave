@@ -15,6 +15,15 @@ pub trait ArchiveType: Clone + PartialEq + std::fmt::Debug + Default + serde::Se
         + std::fmt::Debug
         + serde::Serialize
         + for<'de> serde::Deserialize<'de>;
+
+    /// The type used to represent soft object paths in this archive format.
+    /// - For save games: `SoftObjectPath` enum with asset paths
+    /// - For assets: Could be different representation
+    type SoftObjectPath: Clone
+        + PartialEq
+        + std::fmt::Debug
+        + serde::Serialize
+        + for<'de> serde::Deserialize<'de>;
 }
 
 pub trait ArchiveReader: Read + Seek {
@@ -40,6 +49,11 @@ pub trait ArchiveReader: Read + Seek {
 
     /// Read an object reference from the archive
     fn read_object_ref(&mut self) -> Result<<Self::ArchiveType as ArchiveType>::ObjectRef>;
+
+    /// Read a soft object path from the archive
+    fn read_soft_object_path(
+        &mut self,
+    ) -> Result<<Self::ArchiveType as ArchiveType>::SoftObjectPath>;
 
     /// Record a property schema at the given path
     fn record_schema(&mut self, path: String, tag: PropertyTagPartial);
@@ -79,6 +93,12 @@ pub trait ArchiveWriter: Write + Seek {
         object_ref: &<Self::ArchiveType as ArchiveType>::ObjectRef,
     ) -> Result<()>;
 
+    /// Write a soft object path to the archive
+    fn write_soft_object_path(
+        &mut self,
+        soft_object_path: &<Self::ArchiveType as ArchiveType>::SoftObjectPath,
+    ) -> Result<()>;
+
     /// Get a property schema at the given path
     fn get_schema(&self, path: &str) -> Option<PropertyTagPartial>;
 
@@ -97,6 +117,7 @@ pub struct SaveGameArchiveType;
 
 impl ArchiveType for SaveGameArchiveType {
     type ObjectRef = String;
+    type SoftObjectPath = crate::SoftObjectPath;
 }
 
 impl<R> ArchiveReader for SaveGameArchive<R>
@@ -130,6 +151,10 @@ where
 
     fn read_object_ref(&mut self) -> Result<String> {
         crate::read_string(self)
+    }
+
+    fn read_soft_object_path(&mut self) -> Result<crate::SoftObjectPath> {
+        crate::SoftObjectPath::read(self)
     }
 
     fn record_schema(&mut self, path: String, tag: PropertyTagPartial) {
@@ -175,6 +200,10 @@ where
 
     fn write_object_ref(&mut self, object_ref: &String) -> Result<()> {
         crate::write_string(self, object_ref)
+    }
+
+    fn write_soft_object_path(&mut self, soft_object_path: &crate::SoftObjectPath) -> Result<()> {
+        soft_object_path.write(self)
     }
 
     fn get_schema(&self, path: &str) -> Option<PropertyTagPartial> {

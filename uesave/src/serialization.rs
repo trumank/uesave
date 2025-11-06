@@ -1,6 +1,6 @@
 use crate::{
     Properties, Property, PropertyKey, PropertySchemas, PropertyTagDataPartial, PropertyValue,
-    Root, Save, StructType, StructValue, ValueVec,
+    Root, Save, SoftObjectPath, StructType, StructValue, ValueVec,
 };
 use serde::{
     de::{DeserializeSeed, MapAccess, SeqAccess, Visitor},
@@ -728,7 +728,7 @@ where
         Enum(Vec<String>),
         Str(Vec<String>),
         Text(Vec<crate::Text>),
-        SoftObject(Vec<(String, String)>),
+        SoftObject(Vec<SoftObjectPath>),
         Name(Vec<String>),
         Object(Vec<String>),
         Box(Vec<crate::Box>),
