@@ -175,10 +175,6 @@ fn test_read_int_property() -> Result<()> {
             "VersionNumber".into(),
             Property {
                 inner: PropertyInner::Int(2),
-                tag: PropertyTagPartial {
-                    id: None,
-                    data: PropertyTagDataPartial::Other(PropertyType::IntProperty)
-                }
             }
         ))
     );
@@ -211,43 +207,24 @@ fn test_read_struct_property() -> Result<()> {
         Some((
             "VanityMasterySave".into(),
             Property {
-                tag: PropertyTagPartial {
-                    id: None,
-                    data: PropertyTagDataPartial::Struct {
-                        struct_type: StructType::Struct(Some("VanityMasterySave".to_string())),
-                        id: FGuid::nil(),
-                    }
-                },
                 inner: PropertyInner::Struct(StructValue::Struct(Properties(
                     indexmap::IndexMap::from([
                         (
                             "Level".into(),
                             Property {
                                 inner: PropertyInner::Int(140),
-                                tag: PropertyTagPartial {
-                                    id: None,
-                                    data: PropertyTagDataPartial::Other(PropertyType::IntProperty)
-                                }
                             }
                         ),
                         (
                             "XP".into(),
                             Property {
                                 inner: PropertyInner::Int(9018),
-                                tag: PropertyTagPartial {
-                                    id: None,
-                                    data: PropertyTagDataPartial::Other(PropertyType::IntProperty)
-                                }
                             },
                         ),
                         (
                             "HasAwardedForOldPurchases".into(),
                             Property {
                                 inner: PropertyInner::Bool(true),
-                                tag: PropertyTagPartial {
-                                    id: None,
-                                    data: PropertyTagDataPartial::Other(PropertyType::BoolProperty)
-                                }
                             },
                         ),
                     ])
@@ -274,12 +251,6 @@ fn test_read_array_property() -> Result<()> {
             "StatIndices".into(),
             Property {
                 inner: PropertyInner::Array(ValueArray::Base(ValueVec::Int(vec![0]))),
-                tag: PropertyTagPartial {
-                    id: None,
-                    data: PropertyTagDataPartial::Array(
-                        PropertyTagDataPartial::Other(PropertyType::IntProperty).into()
-                    )
-                }
             }
         ))
     );
@@ -288,16 +259,23 @@ fn test_read_array_property() -> Result<()> {
 
 fn rw_property(original: &[u8]) -> Result<()> {
     let mut reader = Cursor::new(&original);
-    run(&mut reader, |reader| {
+    let (property, schemas) = run(&mut reader, |reader| {
         let property = read_property(reader)?.unwrap();
         println!("{property:#?}");
-        let mut reconstructed: Vec<u8> = vec![];
-        run(&mut Cursor::new(&mut reconstructed), |writer| {
-            write_property((&property.0, &property.1), writer)
-        })?;
-        assert_eq!(original, &reconstructed[..]);
-        Ok(())
-    })
+        // Extract schemas from the reader archive
+        let schemas = reader.schemas.borrow().clone();
+        Ok((property, schemas))
+    })?;
+
+    let mut reconstructed: Vec<u8> = vec![];
+    run(&mut Cursor::new(&mut reconstructed), |writer| {
+        // Inject schemas into the writer archive
+        *writer.schemas.borrow_mut() = schemas;
+        write_property((&property.0, &property.1), writer)
+    })?;
+
+    assert_eq!(original, &reconstructed[..]);
+    Ok(())
 }
 
 #[test]

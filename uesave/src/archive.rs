@@ -1,6 +1,6 @@
 use std::io::{Read, Seek, Write};
 
-use crate::{Header, Result, SaveGameArchive, StructType, VersionInfo};
+use crate::{Header, PropertyTagPartial, Result, SaveGameArchive, StructType, VersionInfo};
 
 pub trait ArchiveReader: Read + Seek {
     fn version(&self) -> &dyn VersionInfo;
@@ -24,6 +24,12 @@ pub trait ArchiveReader: Read + Seek {
     /// Read an object reference from the archive
     fn read_object_ref(&mut self) -> Result<String>;
 
+    /// Record a property schema at the given path
+    fn record_schema(&mut self, path: String, tag: PropertyTagPartial);
+
+    /// Get the current property path in the scope hierarchy
+    fn path(&self) -> String;
+
     /// Returns true if diagnostic logging is enabled
     fn log(&self) -> bool {
         false
@@ -36,6 +42,12 @@ pub trait ArchiveWriter: Write + Seek {
     /// Set version information (typically called after reading/writing the header)
     fn set_version(&mut self, header: Header);
 
+    /// Execute a closure with a modified scope for type hint lookups.
+    /// The scope is used to track the current property path (e.g., "root.PlayerData.Inventory")
+    fn with_scope<F, T>(&mut self, name: &str, f: F) -> T
+    where
+        F: FnOnce(&mut Self) -> T;
+
     /// Write a string to the archive
     fn write_string(&mut self, string: &str) -> Result<()>;
 
@@ -44,6 +56,12 @@ pub trait ArchiveWriter: Write + Seek {
 
     /// Write an object reference to the archive
     fn write_object_ref(&mut self, object_ref: &str) -> Result<()>;
+
+    /// Get a property schema at the given path
+    fn get_schema(&self, path: &str) -> Option<PropertyTagPartial>;
+
+    /// Get the current property path in the scope hierarchy
+    fn path(&self) -> String;
 
     /// Returns true if diagnostic logging is enabled
     fn log(&self) -> bool {
@@ -82,6 +100,14 @@ where
         crate::read_string(self)
     }
 
+    fn record_schema(&mut self, path: String, tag: PropertyTagPartial) {
+        self.schemas.borrow_mut().record(path, tag);
+    }
+
+    fn path(&self) -> String {
+        self.scope.path()
+    }
+
     fn log(&self) -> bool {
         SaveGameArchive::log(self)
     }
@@ -98,6 +124,13 @@ where
         SaveGameArchive::set_version(self, header)
     }
 
+    fn with_scope<F, T>(&mut self, name: &str, f: F) -> T
+    where
+        F: FnOnce(&mut Self) -> T,
+    {
+        SaveGameArchive::with_scope(self, name, f)
+    }
+
     fn write_string(&mut self, string: &str) -> Result<()> {
         crate::write_string(self, string)
     }
@@ -108,6 +141,14 @@ where
 
     fn write_object_ref(&mut self, object_ref: &str) -> Result<()> {
         crate::write_string(self, object_ref)
+    }
+
+    fn get_schema(&self, path: &str) -> Option<PropertyTagPartial> {
+        self.schemas.borrow().get(path).cloned()
+    }
+
+    fn path(&self) -> String {
+        self.scope.path()
     }
 
     fn log(&self) -> bool {

@@ -1,9 +1,13 @@
 use std::{
+    cell::RefCell,
+    collections::BTreeMap,
     io::{Read, Seek, Write},
     rc::Rc,
 };
 
-use crate::{Header, Result, StructType};
+use serde::{Deserialize, Serialize};
+
+use crate::{Header, PropertyTagPartial, Result, StructType};
 
 /// Used to disambiguate types within a [`Property::Set`] or [`Property::Map`] during parsing.
 #[derive(Debug, Default, Clone)]
@@ -23,6 +27,35 @@ impl Types {
     }
 }
 
+/// Storage for property schemas (tags) separated from property data.
+/// Maps property paths to their type metadata.
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PropertySchemas {
+    schemas: BTreeMap<String, PropertyTagPartial>,
+}
+
+impl PropertySchemas {
+    /// Create an empty PropertySchemas
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record a schema at the given path
+    pub(crate) fn record(&mut self, path: String, tag: PropertyTagPartial) {
+        self.schemas.insert(path, tag);
+    }
+
+    /// Get a schema at the given path
+    pub(crate) fn get(&self, path: &str) -> Option<&PropertyTagPartial> {
+        self.schemas.get(path)
+    }
+
+    /// Get all schemas
+    pub fn schemas(&self) -> &BTreeMap<String, PropertyTagPartial> {
+        &self.schemas
+    }
+}
+
 /// Represents the current position in the property hierarchy as a stack of names.
 /// Used for looking up type hints in the Types map.
 #[derive(Debug, Clone, Default)]
@@ -35,15 +68,15 @@ impl Scope {
         Self::default()
     }
 
-    fn path(&self) -> String {
+    pub(crate) fn path(&self) -> String {
         self.components.join(".")
     }
 
-    fn push(&mut self, name: &str) {
+    pub(crate) fn push(&mut self, name: &str) {
         self.components.push(name.to_string());
     }
 
-    fn pop(&mut self) {
+    pub(crate) fn pop(&mut self) {
         self.components.pop();
     }
 }
@@ -55,6 +88,7 @@ pub(crate) struct SaveGameArchive<S> {
     pub(crate) types: Rc<Types>,
     pub(crate) scope: Scope,
     pub(crate) log: bool,
+    pub(crate) schemas: Rc<RefCell<PropertySchemas>>,
 }
 impl<R: Read> Read for SaveGameArchive<R> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
@@ -86,6 +120,7 @@ impl<S> SaveGameArchive<S> {
             types: Rc::new(Types::new()),
             scope: Scope::root(),
             log: false,
+            schemas: Rc::new(RefCell::new(PropertySchemas::new())),
         })
     }
     pub(crate) fn with_scope<F, T>(&mut self, name: &str, f: F) -> T

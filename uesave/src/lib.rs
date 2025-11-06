@@ -34,13 +34,14 @@ mod error;
 #[cfg(test)]
 mod tests;
 
-pub use context::Types;
+pub use context::{PropertySchemas, Types};
 pub use error::{Error, ParseError};
 
 use byteorder::{ReadBytesExt, WriteBytesExt, LE};
-use context::SaveGameArchive;
+use context::{SaveGameArchive, Scope};
 use std::{
     borrow::Cow,
+    cell::RefCell,
     io::{Cursor, Read, Seek, Write},
     rc::Rc,
 };
@@ -49,10 +50,7 @@ use serde::{de::Visitor, Deserialize, Deserializer, Serialize, Serializer};
 
 use tracing::instrument;
 
-use crate::{
-    archive::{ArchiveReader, ArchiveWriter},
-    context::Scope,
-};
+use crate::archive::{ArchiveReader, ArchiveWriter};
 
 type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -403,7 +401,10 @@ fn write_properties_none_terminated<A: ArchiveWriter>(
 #[instrument(skip_all)]
 fn read_property<A: ArchiveReader>(ar: &mut A) -> Result<Option<(PropertyKey, Property)>> {
     if let Some(tag) = PropertyTagFull::read(ar)? {
-        let value = ar.with_scope(&tag.name, |ar| Property::read(ar, tag.clone()))?;
+        let value = ar.with_scope(&tag.name, |ar| {
+            ar.record_schema(ar.path().to_string(), tag.clone().into_partial());
+            Property::read(ar, tag.clone())
+        })?;
         Ok(Some((PropertyKey(tag.index, tag.name.to_string()), value)))
     } else {
         Ok(None)
@@ -411,33 +412,35 @@ fn read_property<A: ArchiveReader>(ar: &mut A) -> Result<Option<(PropertyKey, Pr
 }
 #[instrument(skip_all)]
 fn write_property<A: ArchiveWriter>(prop: (&PropertyKey, &Property), ar: &mut A) -> Result<()> {
-    let mut tag = prop
-        .1
-        .tag
-        .clone()
-        .into_full(&prop.0 .1, 0, prop.0 .0, prop.1);
+    ar.with_scope(&prop.0 .1, |ar| {
+        let tag_partial = ar
+            .get_schema(&ar.path())
+            .ok_or_else(|| Error::MissingPropertySchema(ar.path()))?;
 
-    // Write tag with placeholder size
-    tag.size = 0;
-    let tag_start = ar.stream_position()?;
-    tag.write(ar)?;
-    let data_start = ar.stream_position()?;
+        let mut tag = tag_partial.into_full(&prop.0 .1, 0, prop.0 .0, prop.1);
 
-    // Write the actual property data
-    prop.1.write(ar, &tag)?;
-    let data_end = ar.stream_position()?;
+        // Write tag with placeholder size
+        tag.size = 0;
+        let tag_start = ar.stream_position()?;
+        tag.write(ar)?;
+        let data_start = ar.stream_position()?;
 
-    // Calculate actual size
-    let size = (data_end - data_start) as u32;
-    tag.size = size;
+        // Write the actual property data
+        prop.1.write(ar, &tag)?;
+        let data_end = ar.stream_position()?;
 
-    // Seek back and rewrite the tag with correct size
-    ar.seek(std::io::SeekFrom::Start(tag_start))?;
-    tag.write(ar)?;
+        // Calculate actual size
+        let size = (data_end - data_start) as u32;
+        tag.size = size;
 
-    // Seek to end to continue writing
-    ar.seek(std::io::SeekFrom::Start(data_end))?;
-    Ok(())
+        // Seek back and rewrite the tag with correct size
+        ar.seek(std::io::SeekFrom::Start(tag_start))?;
+        tag.write(ar)?;
+
+        // Seek to end to continue writing
+        ar.seek(std::io::SeekFrom::Start(data_end))?;
+        Ok(())
+    })
 }
 
 #[instrument(skip_all)]
@@ -2918,10 +2921,10 @@ impl ValueSet {
     }
 }
 
-/// Properties consist of an ID and a value and are present in [`Root`] and [`StructValue::Struct`]
+/// Properties consist of a value and are present in [`Root`] and [`StructValue::Struct`]
+/// Property schemas (tags) are stored separately in [`PropertySchemas`]
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub struct Property {
-    pub tag: PropertyTagPartial,
     #[serde(flatten)]
     pub inner: PropertyInner,
 }
@@ -2967,7 +2970,6 @@ impl Property {
             let mut raw = vec![0; tag.size as usize];
             ar.read_exact(&mut raw)?;
             return Ok(Property {
-                tag: tag.into_partial(),
                 inner: PropertyInner::Raw(raw),
             });
         }
@@ -2989,10 +2991,7 @@ impl Property {
             }
         };
 
-        Ok(Property {
-            tag: tag.into_partial(),
-            inner,
-        })
+        Ok(Property { inner })
     }
 
     fn try_read_inner<A: ArchiveReader>(
@@ -3368,6 +3367,8 @@ pub struct Save {
     pub header: Header,
     pub root: Root,
     pub extra: Vec<u8>,
+    /// Property schemas (tags) separated from property data
+    pub schemas: PropertySchemas,
 }
 impl Save {
     /// Reads save from the given reader
@@ -3382,13 +3383,21 @@ impl Save {
     }
     pub fn write<W: Write>(&self, writer: &mut W) -> Result<()> {
         let mut buffer = vec![];
-        SaveGameArchive::run(&mut Cursor::new(&mut buffer), |writer| -> Result<()> {
-            writer.set_version(self.header.clone());
-            self.header.write(writer)?;
-            self.root.write(writer)?;
-            writer.write_all(&self.extra)?;
-            Ok(())
-        })?;
+        let schemas = Rc::new(RefCell::new(self.schemas.clone()));
+
+        let mut archive_writer = SaveGameArchive {
+            stream: Cursor::new(&mut buffer),
+            version: Some(self.header.clone()),
+            types: Rc::new(Types::new()),
+            scope: Scope::root(),
+            log: false,
+            schemas,
+        };
+
+        self.header.write(&mut archive_writer)?;
+        self.root.write(&mut archive_writer)?;
+        archive_writer.write_all(&self.extra)?;
+
         writer.write_all(&buffer)?;
         Ok(())
     }
@@ -3420,6 +3429,7 @@ impl SaveReader {
     }
     pub fn read<S: Read>(self, stream: S) -> Result<Save, ParseError> {
         let types = self.types.unwrap_or_else(|| Rc::new(Types::new()));
+        let schemas = Rc::new(RefCell::new(PropertySchemas::new()));
 
         let stream = SeekReader::new(stream);
         let mut reader = SaveGameArchive {
@@ -3428,9 +3438,10 @@ impl SaveReader {
             types,
             scope: Scope::root(),
             log: self.log,
+            schemas: schemas.clone(),
         };
 
-        || -> Result<Save> {
+        let result = || -> Result<_> {
             let header = Header::read(&mut reader)?;
             reader.set_version(header.clone());
 
@@ -3447,15 +3458,24 @@ impl SaveReader {
                 buf
             };
 
-            Ok(Save {
+            Ok((header, root, extra))
+        }();
+
+        let offset = reader.stream_position().unwrap() as usize;
+
+        drop(reader);
+
+        let schemas = Rc::try_unwrap(schemas)
+            .expect("Failed to extract schemas")
+            .into_inner();
+
+        result
+            .map(|(header, root, extra)| Save {
                 header,
                 root,
                 extra,
+                schemas,
             })
-        }()
-        .map_err(|e| error::ParseError {
-            offset: reader.stream_position().unwrap() as usize, // our own implemenation which cannot fail
-            error: e,
-        })
+            .map_err(|e| error::ParseError { offset, error: e })
     }
 }

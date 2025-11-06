@@ -8,6 +8,8 @@ pub enum Error {
     UnknownPropertyMeta(String),
     #[error("unknown vec type: {0}")]
     UnknownVecType(String),
+    #[error("missing property schema for path: {0}")]
+    MissingPropertySchema(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("{0}")]
