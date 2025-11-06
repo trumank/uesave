@@ -1,6 +1,6 @@
 use std::fs::File;
 
-use uesave::{Property, Save, StructValue, ValueArray};
+use uesave::{Property, Save, StructValue, ValueVec};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     const PROP_POSITION: &str = "PropPosition_7_B8CD81CD4E138D8E06FBBA8056FE4C85";
@@ -15,7 +15,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     use Property::*;
     let props = &save.root.properties["PropList"];
-    if let Array(ValueArray::Struct(value)) = &props {
+    if let Array(ValueVec::Struct(value)) = &props {
         for prop in value {
             if let StructValue::Struct(p) = prop {
                 if let Struct(StructValue::Struct(value)) = &p[PROP_POSITION] {

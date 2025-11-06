@@ -2498,12 +2498,9 @@ pub enum StructValue<T: ArchiveType = SaveGameArchiveType> {
 }
 
 /// Vectorized properties to avoid storing the variant with each value
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Serialize)]
 #[serde(untagged)]
-#[serde(bound(
-    serialize = "T::ObjectRef: Serialize",
-    deserialize = "T::ObjectRef: Deserialize<'de>"
-))]
+#[serde(bound(serialize = "T::ObjectRef: Serialize"))]
 pub enum ValueVec<T: ArchiveType = SaveGameArchiveType> {
     Int8(Vec<Int8>),
     Int16(Vec<Int16>),
@@ -2524,23 +2521,6 @@ pub enum ValueVec<T: ArchiveType = SaveGameArchiveType> {
     Name(Vec<String>),
     Object(Vec<T::ObjectRef>),
     Box(Vec<Box>),
-}
-
-/// Encapsulates [`ValueVec`] with a special handling of structs. See also: [`ValueSet`]
-#[derive(Debug, PartialEq, Serialize)]
-#[serde(untagged)]
-#[serde(bound(serialize = "T::ObjectRef: Serialize"))]
-pub enum ValueArray<T: ArchiveType = SaveGameArchiveType> {
-    Base(ValueVec<T>),
-    /// Array of structs - type information is stored in the property tag schema
-    Struct(Vec<StructValue<T>>),
-}
-/// Encapsulates [`ValueVec`] with a special handling of structs. See also: [`ValueArray`]
-#[derive(Debug, PartialEq, Serialize)]
-#[serde(untagged)]
-#[serde(bound(serialize = "T::ObjectRef: Serialize"))]
-pub enum ValueSet<T: ArchiveType = SaveGameArchiveType> {
-    Base(ValueVec<T>),
     Struct(Vec<StructValue<T>>),
 }
 
@@ -2838,17 +2818,23 @@ impl<T: ArchiveType> ValueVec<T> {
                     i.write(ar)?;
                 }
             }
+            ValueVec::Struct(v) => {
+                ar.write_u32::<LE>(v.len() as u32)?;
+                for i in v {
+                    i.write(ar)?;
+                }
+            }
         }
         Ok(())
     }
 }
-impl<T: ArchiveType> ValueArray<T> {
-    #[instrument(name = "ValueArray_read", skip_all)]
-    fn read<A: ArchiveReader<ArchiveType = T>>(
+impl<T: ArchiveType> ValueVec<T> {
+    #[instrument(name = "ValueVec_read_array", skip_all)]
+    fn read_array<A: ArchiveReader<ArchiveType = T>>(
         ar: &mut A,
         tag: PropertyTagDataFull,
         size: u32,
-    ) -> Result<(ValueArray<T>, Option<PropertyTagDataFull>)> {
+    ) -> Result<(ValueVec<T>, Option<PropertyTagDataFull>)> {
         let count = ar.read_u32::<LE>()?;
         Ok(match tag {
             PropertyTagDataFull::Struct { struct_type, id: _ } => {
@@ -2884,21 +2870,18 @@ impl<T: ArchiveType> ValueArray<T> {
                 for _ in 0..count {
                     value.push(StructValue::read(ar, &struct_type)?);
                 }
-                (ValueArray::Struct(value), updated)
+                (ValueVec::Struct(value), updated)
             }
-            _ => (
-                ValueArray::Base(ValueVec::read(ar, &tag.basic_type(), size, count)?),
-                None,
-            ),
+            _ => (ValueVec::read(ar, &tag.basic_type(), size, count)?, None),
         })
     }
-    fn write<A: ArchiveWriter<ArchiveType = T>>(
+    fn write_array<A: ArchiveWriter<ArchiveType = T>>(
         &self,
         ar: &mut A,
         tag: &PropertyTagFull,
     ) -> Result<()> {
         match &self {
-            ValueArray::Struct(value) => {
+            ValueVec::Struct(value) => {
                 ar.write_u32::<LE>(value.len() as u32)?;
 
                 if !ar.version().property_tag() && ar.version().array_inner_tag() {
@@ -2945,43 +2928,27 @@ impl<T: ArchiveType> ValueArray<T> {
                     }
                 }
             }
-            ValueArray::Base(vec) => {
-                vec.write(ar)?;
+            _ => {
+                self.write(ar)?;
             }
         }
         Ok(())
     }
-}
-impl<T: ArchiveType> ValueSet<T> {
-    #[instrument(name = "ValueSet_read", skip_all)]
-    fn read<A: ArchiveReader<ArchiveType = T>>(
+    #[instrument(name = "ValueVec_read_set", skip_all)]
+    fn read_set<A: ArchiveReader<ArchiveType = T>>(
         ar: &mut A,
         t: &PropertyTagDataFull,
         size: u32,
-    ) -> Result<ValueSet<T>> {
+    ) -> Result<ValueVec<T>> {
         let count = ar.read_u32::<LE>()?;
         Ok(match t {
             PropertyTagDataFull::Struct { struct_type, .. } => {
-                ValueSet::Struct(read_array(count, ar, |r| {
+                ValueVec::Struct(read_array(count, ar, |r| {
                     StructValue::read(r, struct_type)
                 })?)
             }
-            _ => ValueSet::Base(ValueVec::read(ar, &t.basic_type(), size, count)?),
+            _ => ValueVec::read(ar, &t.basic_type(), size, count)?,
         })
-    }
-    fn write<A: ArchiveWriter<ArchiveType = T>>(&self, ar: &mut A) -> Result<()> {
-        match &self {
-            ValueSet::Struct(value) => {
-                ar.write_u32::<LE>(value.len() as u32)?;
-                for v in value {
-                    v.write(ar)?;
-                }
-            }
-            ValueSet::Base(vec) => {
-                vec.write(ar)?;
-            }
-        }
-        Ok(())
     }
 }
 
@@ -3013,10 +2980,10 @@ pub enum Property<T: ArchiveType = SaveGameArchiveType> {
     MulticastDelegate(MulticastDelegate),
     MulticastInlineDelegate(MulticastInlineDelegate),
     MulticastSparseDelegate(MulticastSparseDelegate),
-    Set(ValueSet<T>),
+    Set(ValueVec<T>),
     Map(Vec<MapEntry<T>>),
     Struct(StructValue<T>),
-    Array(ValueArray<T>),
+    Array(ValueVec<T>),
     /// Raw property data when parsing fails
     Raw(Vec<u8>),
 }
@@ -3071,7 +3038,7 @@ impl<T: ArchiveType> Property<T> {
             PropertyTagDataFull::Set { key_type } => {
                 ar.read_u32::<LE>()?;
                 (
-                    Property::Set(ValueSet::read(ar, key_type, tag.size - 8)?),
+                    Property::Set(ValueVec::read_set(ar, key_type, tag.size - 8)?),
                     None,
                 )
             }
@@ -3093,7 +3060,7 @@ impl<T: ArchiveType> Property<T> {
                 (Property::Struct(StructValue::read(ar, struct_type)?), None)
             }
             PropertyTagDataFull::Array(data) => {
-                let (array, updated_data) = ValueArray::read(ar, *data.clone(), tag.size - 4)?;
+                let (array, updated_data) = ValueVec::read_array(ar, *data.clone(), tag.size - 4)?;
                 (Property::Array(array), updated_data)
             }
             PropertyTagDataFull::Other(t) => (
@@ -3237,7 +3204,7 @@ impl<T: ArchiveType> Property<T> {
                 value.write(ar)?;
             }
             Property::Array(value) => {
-                value.write(ar, tag)?;
+                value.write_array(ar, tag)?;
             }
             Property::Raw(value) => {
                 ar.write_all(value)?;

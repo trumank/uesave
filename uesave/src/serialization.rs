@@ -1,6 +1,6 @@
 use crate::{
     Properties, Property, PropertyKey, PropertySchemas, PropertyTagDataPartial, PropertyValue,
-    Root, Save, StructType, StructValue, ValueArray, ValueSet, ValueVec,
+    Root, Save, StructType, StructValue, ValueVec,
 };
 use serde::{
     de::{DeserializeSeed, MapAccess, SeqAccess, Visitor},
@@ -104,8 +104,8 @@ impl<'de, 'a> DeserializeSeed<'de> for PropertySeed<'a> {
                 Ok(Property::Struct(sv))
             }
             PropertyTagDataPartial::Array(inner_tag) => {
-                let va = ValueArraySeed {
-                    inner_tag,
+                let va = ValueVecSeed {
+                    tag: inner_tag,
                     path: self.path,
                     schemas: self.schemas,
                 }
@@ -113,8 +113,8 @@ impl<'de, 'a> DeserializeSeed<'de> for PropertySeed<'a> {
                 Ok(Property::Array(va))
             }
             PropertyTagDataPartial::Set { key_type } => {
-                let vs = ValueSetSeed {
-                    key_type,
+                let vs = ValueVecSeed {
+                    tag: key_type,
                     path: self.path,
                     schemas: self.schemas,
                 }
@@ -198,32 +198,32 @@ impl<'de, 'a> DeserializeSeed<'de> for StructValueSeed<'a> {
     }
 }
 
-struct ValueArraySeed<'a> {
-    inner_tag: &'a PropertyTagDataPartial,
+struct ValueVecSeed<'a> {
+    tag: &'a PropertyTagDataPartial,
     path: &'a str,
     schemas: &'a PropertySchemas,
 }
 
-impl<'de, 'a> DeserializeSeed<'de> for ValueArraySeed<'a> {
-    type Value = ValueArray;
+impl<'de, 'a> DeserializeSeed<'de> for ValueVecSeed<'a> {
+    type Value = ValueVec;
 
     fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
     where
         D: Deserializer<'de>,
     {
-        match self.inner_tag {
+        match self.tag {
             PropertyTagDataPartial::Struct { struct_type, .. } => {
-                struct StructArrayVisitor<'a> {
+                struct StructVecVisitor<'a> {
                     struct_type: &'a StructType,
                     path: &'a str,
                     schemas: &'a PropertySchemas,
                 }
 
-                impl<'de, 'a> Visitor<'de> for StructArrayVisitor<'a> {
+                impl<'de, 'a> Visitor<'de> for StructVecVisitor<'a> {
                     type Value = Vec<StructValue>;
 
                     fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-                        formatter.write_str("array of structs")
+                        formatter.write_str("array or set of structs")
                     }
 
                     fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
@@ -242,73 +242,17 @@ impl<'de, 'a> DeserializeSeed<'de> for ValueArraySeed<'a> {
                     }
                 }
 
-                let structs = deserializer.deserialize_seq(StructArrayVisitor {
+                let structs = deserializer.deserialize_seq(StructVecVisitor {
                     struct_type,
                     path: self.path,
                     schemas: self.schemas,
                 })?;
-                Ok(ValueArray::Struct(structs))
+                Ok(ValueVec::Struct(structs))
             }
             _ => {
-                // For base types, delegate to the derived Deserialize impl
-                Ok(ValueArray::Base(ValueVec::deserialize(deserializer)?))
+                // For base types, manually deserialize without the Struct variant
+                deserialize_value_vec_base(deserializer)
             }
-        }
-    }
-}
-
-struct ValueSetSeed<'a> {
-    key_type: &'a PropertyTagDataPartial,
-    path: &'a str,
-    schemas: &'a PropertySchemas,
-}
-
-impl<'de, 'a> DeserializeSeed<'de> for ValueSetSeed<'a> {
-    type Value = ValueSet;
-
-    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        match self.key_type {
-            PropertyTagDataPartial::Struct { struct_type, .. } => {
-                struct StructSetVisitor<'a> {
-                    struct_type: &'a StructType,
-                    path: &'a str,
-                    schemas: &'a PropertySchemas,
-                }
-
-                impl<'de, 'a> Visitor<'de> for StructSetVisitor<'a> {
-                    type Value = Vec<StructValue>;
-
-                    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-                        formatter.write_str("set of structs")
-                    }
-
-                    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
-                    where
-                        A: SeqAccess<'de>,
-                    {
-                        let mut vec = Vec::new();
-                        while let Some(elem) = seq.next_element_seed(StructValueSeed {
-                            struct_type: self.struct_type,
-                            path: self.path,
-                            schemas: self.schemas,
-                        })? {
-                            vec.push(elem);
-                        }
-                        Ok(vec)
-                    }
-                }
-
-                let structs = deserializer.deserialize_seq(StructSetVisitor {
-                    struct_type,
-                    path: self.path,
-                    schemas: self.schemas,
-                })?;
-                Ok(ValueSet::Struct(structs))
-            }
-            _ => Ok(ValueSet::Base(ValueVec::deserialize(deserializer)?)),
         }
     }
 }
@@ -754,4 +698,59 @@ impl<'de> Deserialize<'de> for Save {
             SaveVisitor,
         )
     }
+}
+
+// Helper function to deserialize ValueVec for non-struct base types
+fn deserialize_value_vec_base<'de, D>(deserializer: D) -> Result<ValueVec, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    // We need to implement custom deserialization since ValueVec doesn't derive Deserialize
+    // For now, use untagged enum deserialization for all non-Struct variants
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum ValueVecBase {
+        Int8(Vec<i8>),
+        Int16(Vec<i16>),
+        Int(Vec<i32>),
+        Int64(Vec<i64>),
+        UInt8(Vec<u8>),
+        UInt16(Vec<u16>),
+        UInt32(Vec<u32>),
+        UInt64(Vec<u64>),
+        Float(Vec<crate::Float>),
+        Double(Vec<crate::Double>),
+        Bool(Vec<bool>),
+        Byte(crate::ByteArray),
+        Enum(Vec<String>),
+        Str(Vec<String>),
+        Text(Vec<crate::Text>),
+        SoftObject(Vec<(String, String)>),
+        Name(Vec<String>),
+        Object(Vec<String>),
+        Box(Vec<crate::Box>),
+    }
+
+    let base = ValueVecBase::deserialize(deserializer)?;
+    Ok(match base {
+        ValueVecBase::Int8(v) => ValueVec::Int8(v),
+        ValueVecBase::Int16(v) => ValueVec::Int16(v),
+        ValueVecBase::Int(v) => ValueVec::Int(v),
+        ValueVecBase::Int64(v) => ValueVec::Int64(v),
+        ValueVecBase::UInt8(v) => ValueVec::UInt8(v),
+        ValueVecBase::UInt16(v) => ValueVec::UInt16(v),
+        ValueVecBase::UInt32(v) => ValueVec::UInt32(v),
+        ValueVecBase::UInt64(v) => ValueVec::UInt64(v),
+        ValueVecBase::Float(v) => ValueVec::Float(v),
+        ValueVecBase::Double(v) => ValueVec::Double(v),
+        ValueVecBase::Bool(v) => ValueVec::Bool(v),
+        ValueVecBase::Byte(v) => ValueVec::Byte(v),
+        ValueVecBase::Enum(v) => ValueVec::Enum(v),
+        ValueVecBase::Str(v) => ValueVec::Str(v),
+        ValueVecBase::Text(v) => ValueVec::Text(v),
+        ValueVecBase::SoftObject(v) => ValueVec::SoftObject(v),
+        ValueVecBase::Name(v) => ValueVec::Name(v),
+        ValueVecBase::Object(v) => ValueVec::Object(v),
+        ValueVecBase::Box(v) => ValueVec::Box(v),
+    })
 }

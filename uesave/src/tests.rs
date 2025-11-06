@@ -225,7 +225,7 @@ fn test_read_array_property() -> Result<()> {
         run(&mut reader, read_property)?,
         Some((
             "StatIndices".into(),
-            Property::Array(ValueArray::Base(ValueVec::Int(vec![0]))),
+            Property::Array(ValueVec::Int(vec![0])),
         ))
     );
     Ok(())
