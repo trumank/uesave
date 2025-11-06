@@ -3201,11 +3201,40 @@ pub struct PackageVersion {
 }
 
 pub trait VersionInfo {
-    fn large_world_coordinates(&self) -> bool;
-    fn property_tag(&self) -> bool;
-    fn property_guid(&self) -> bool;
-    fn array_inner_tag(&self) -> bool;
-    fn remove_asset_path_fnames(&self) -> bool;
+    fn engine_version_major(&self) -> u16;
+    fn engine_version_minor(&self) -> u16;
+    fn engine_version_patch(&self) -> u16;
+    fn package_file_version_ue4(&self) -> u32;
+    fn package_file_version_ue5(&self) -> u32;
+
+    /// Whether the engine uses large world coordinates (FVector with doubles)
+    fn large_world_coordinates(&self) -> bool {
+        self.engine_version_major() >= 5
+    }
+
+    /// Whether property tags include complete type names
+    fn property_tag(&self) -> bool {
+        // PROPERTY_TAG_COMPLETE_TYPE_NAME
+        (self.engine_version_major(), self.engine_version_minor()) >= (5, 4)
+    }
+
+    /// Whether property tags include GUIDs
+    fn property_guid(&self) -> bool {
+        // VER_UE4_PROPERTY_GUID_IN_PROPERTY_TAG
+        (self.engine_version_major(), self.engine_version_minor()) >= (4, 12)
+    }
+
+    /// Whether array properties have inner type tags
+    fn array_inner_tag(&self) -> bool {
+        // VAR_UE4_ARRAY_PROPERTY_INNER_TAGS
+        (self.engine_version_major(), self.engine_version_minor()) >= (4, 12)
+    }
+
+    /// Whether asset paths should not use FNames
+    fn remove_asset_path_fnames(&self) -> bool {
+        // FSOFTOBJECTPATH_REMOVE_ASSET_PATH_FNAMES
+        self.package_file_version_ue5() >= 1007
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3221,27 +3250,20 @@ pub struct Header {
     pub custom_version: Option<(u32, Vec<CustomFormatData>)>,
 }
 impl VersionInfo for Header {
-    fn large_world_coordinates(&self) -> bool {
-        self.engine_version_major >= 5
+    fn engine_version_major(&self) -> u16 {
+        self.engine_version_major
     }
-    fn property_tag(&self) -> bool {
-        // PROPERTY_TAG_COMPLETE_TYPE_NAME
-        (self.engine_version_major, self.engine_version_minor) >= (5, 4)
+    fn engine_version_minor(&self) -> u16 {
+        self.engine_version_minor
     }
-    fn property_guid(&self) -> bool {
-        (self.engine_version_major, self.engine_version_minor) >= (4, 12)
-        // TODO really should check object version but would break a lot of saves with mangled headers
-        // self.package_version.ue4 >= 503 // VER_UE4_PROPERTY_GUID_IN_PROPERTY_TAG
+    fn engine_version_patch(&self) -> u16 {
+        self.engine_version_patch
     }
-    fn array_inner_tag(&self) -> bool {
-        // VAR_UE4_ARRAY_PROPERTY_INNER_TAGS
-        (self.engine_version_major, self.engine_version_minor) >= (4, 12)
+    fn package_file_version_ue4(&self) -> u32 {
+        self.package_version.ue4
     }
-    fn remove_asset_path_fnames(&self) -> bool {
-        self.package_version
-            .ue5
-            .map(|ue5| ue5 >= 1007) // FSOFTOBJECTPATH_REMOVE_ASSET_PATH_FNAMES
-            .unwrap_or_default()
+    fn package_file_version_ue5(&self) -> u32 {
+        self.package_version.ue5.unwrap_or(0)
     }
 }
 impl Header {
