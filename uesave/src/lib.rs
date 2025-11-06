@@ -1233,6 +1233,7 @@ pub enum StructType {
     SoftClassPath,
     GameplayTagContainer,
     UniqueNetIdRepl,
+    KeyHandleMap,
     RichCurveKey,
     Raw(String),
     Struct(Option<String>),
@@ -1257,6 +1258,7 @@ impl From<&str> for StructType {
             "SoftClassPath" => StructType::SoftClassPath,
             "GameplayTagContainer" => StructType::GameplayTagContainer,
             "UniqueNetIdRepl" => StructType::UniqueNetIdRepl,
+            "KeyHandleMap" => StructType::KeyHandleMap,
             "RichCurveKey" => StructType::RichCurveKey,
             "Struct" => StructType::Struct(None),
             _ => StructType::Struct(Some(t.to_owned())),
@@ -1282,6 +1284,7 @@ impl From<String> for StructType {
             "SoftObjectPath" => StructType::SoftObjectPath,
             "SoftClassPath" => StructType::SoftClassPath,
             "GameplayTagContainer" => StructType::GameplayTagContainer,
+            "KeyHandleMap" => StructType::KeyHandleMap,
             "RichCurveKey" => StructType::RichCurveKey,
             "UniqueNetIdRepl" => StructType::UniqueNetIdRepl,
             "Struct" => StructType::Struct(None),
@@ -1309,6 +1312,7 @@ impl StructType {
             "/Script/CoreUObject.SoftClassPath" => StructType::SoftClassPath,
             "/Script/GameplayTags.GameplayTagContainer" => StructType::GameplayTagContainer,
             "/Script/Engine.UniqueNetIdRepl" => StructType::UniqueNetIdRepl,
+            "/Script/Engine.KeyHandleMap" => StructType::KeyHandleMap,
             "/Script/Engine.RichCurveKey" => StructType::RichCurveKey,
             "/Script/CoreUObject.Struct" => StructType::Struct(None),
             _ if raw => StructType::Raw(t.to_owned()),
@@ -1334,6 +1338,7 @@ impl StructType {
             StructType::SoftClassPath => "/Script/CoreUObject.SoftClassPath",
             StructType::GameplayTagContainer => "/Script/GameplayTags.GameplayTagContainer",
             StructType::UniqueNetIdRepl => "/Script/Engine.UniqueNetIdRepl",
+            StructType::KeyHandleMap => "/Script/Engine.KeyHandleMap",
             StructType::RichCurveKey => "/Script/Engine.RichCurveKey",
             StructType::Raw(t) => t,
             StructType::Struct(Some(t)) => t,
@@ -1359,6 +1364,7 @@ impl StructType {
             StructType::SoftClassPath => "SoftClassPath",
             StructType::GameplayTagContainer => "GameplayTagContainer",
             StructType::UniqueNetIdRepl => "UniqueNetIdRepl",
+            StructType::KeyHandleMap => "KeyHandleMap",
             StructType::RichCurveKey => "RichCurveKey",
             StructType::Raw(t) => t,
             StructType::Struct(Some(t)) => t,
@@ -2033,6 +2039,18 @@ impl IntPoint {
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
+pub struct FKeyHandleMap {}
+impl FKeyHandleMap {
+    #[instrument(name = "FKeyHandleMap_read", skip_all)]
+    fn read<A: ArchiveReader>(_ar: &mut A) -> Result<Self> {
+        Ok(Self {})
+    }
+    fn write<A: ArchiveWriter>(&self, _ar: &mut A) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub struct FRichCurveKey {
     /// Interpolation mode between this key and the next
     pub interp_mode: u8,
@@ -2614,6 +2632,7 @@ pub enum StructValue<T: ArchiveType = SaveGameArchiveType> {
     SoftClassPath(T::SoftObjectPath),
     GameplayTagContainer(GameplayTagContainer),
     UniqueNetIdRepl(UniqueNetIdRepl),
+    KeyHandleMap(FKeyHandleMap),
     RichCurveKey(FRichCurveKey),
     /// Raw struct data for other unknown structs serialized with HasBinaryOrNativeSerialize
     Raw(Vec<u8>),
@@ -2735,6 +2754,7 @@ impl<T: ArchiveType> StructValue<T> {
                 StructValue::GameplayTagContainer(GameplayTagContainer::read(ar)?)
             }
             StructType::UniqueNetIdRepl => StructValue::UniqueNetIdRepl(UniqueNetIdRepl::read(ar)?),
+            StructType::KeyHandleMap => StructValue::KeyHandleMap(FKeyHandleMap::read(ar)?),
             StructType::RichCurveKey => StructValue::RichCurveKey(FRichCurveKey::read(ar)?),
             StructType::Raw(_) => unreachable!("should be handled at property level"),
             StructType::Struct(_) => StructValue::Struct(read_properties_until_none(ar)?),
@@ -2759,6 +2779,7 @@ impl<T: ArchiveType> StructValue<T> {
             StructValue::SoftClassPath(v) => ar.write_soft_object_path(v)?,
             StructValue::GameplayTagContainer(v) => v.write(ar)?,
             StructValue::UniqueNetIdRepl(v) => v.write(ar)?,
+            StructValue::KeyHandleMap(v) => v.write(ar)?,
             StructValue::RichCurveKey(v) => v.write(ar)?,
             StructValue::Raw(v) => ar.write_all(v)?,
             StructValue::Struct(v) => write_properties_none_terminated(ar, v)?,
