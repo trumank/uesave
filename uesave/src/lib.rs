@@ -382,7 +382,7 @@ impl<'a, T: ArchiveType> IntoIterator for &'a Properties<T> {
 }
 
 #[instrument(skip_all)]
-fn read_properties_until_none<T: ArchiveType, A: ArchiveReader<ArchiveType = T>>(
+pub fn read_properties_until_none<T: ArchiveType, A: ArchiveReader<ArchiveType = T>>(
     ar: &mut A,
 ) -> Result<Properties<T>> {
     let mut properties = Properties::default();
