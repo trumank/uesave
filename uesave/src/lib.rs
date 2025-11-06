@@ -3179,14 +3179,20 @@ impl<T: ArchiveType> Property<T> {
         let (inner, updated_tag_data) = match Self::try_read_inner(ar, &tag) {
             Ok(result) => result,
             Err(e) => {
-                // Parsing failed, seek back to start and read raw data
-                if ar.log() {
-                    eprintln!("Warning: Failed to parse property '{}': {}", ar.path(), e);
+                // Check if we should convert errors to raw properties
+                if ar.error_to_raw() {
+                    // Parsing failed, seek back to start and read raw data
+                    if ar.log() {
+                        eprintln!("Warning: Failed to parse property '{}': {}", ar.path(), e);
+                    }
+                    ar.seek(std::io::SeekFrom::Start(start_position))?;
+                    let mut property_data = vec![0u8; tag.size as usize];
+                    ar.read_exact(&mut property_data)?;
+                    (Property::Raw(property_data), None)
+                } else {
+                    // Error mode: return the error immediately
+                    return Err(e);
                 }
-                ar.seek(std::io::SeekFrom::Start(start_position))?;
-                let mut property_data = vec![0u8; tag.size as usize];
-                ar.read_exact(&mut property_data)?;
-                (Property::Raw(property_data), None)
             }
         };
 
@@ -3610,6 +3616,7 @@ impl Save {
             types: Rc::new(Types::new()),
             scope: Scope::root(),
             log: false,
+            error_to_raw: true,
             schemas,
         };
 
@@ -3624,6 +3631,7 @@ impl Save {
 
 pub struct SaveReader {
     log: bool,
+    error_to_raw: bool,
     types: Option<Rc<Types>>,
 }
 impl Default for SaveReader {
@@ -3635,11 +3643,24 @@ impl SaveReader {
     pub fn new() -> Self {
         Self {
             log: false,
+            error_to_raw: false,
             types: None,
         }
     }
     pub fn log(mut self, log: bool) -> Self {
         self.log = log;
+        self
+    }
+    /// Configure whether parsing errors should produce Raw properties (true) or fail immediately (false).
+    ///
+    /// When set to `true` (default), if a property cannot be parsed, it will be stored as a
+    /// `Property::Raw` containing the raw bytes. This allows partial parsing of save files
+    /// with unknown or corrupted properties.
+    ///
+    /// When set to `false`, parsing errors will immediately return an error, allowing you to
+    /// detect and handle parsing issues explicitly.
+    pub fn error_to_raw(mut self, error_to_raw: bool) -> Self {
+        self.error_to_raw = error_to_raw;
         self
     }
     pub fn types(mut self, types: Types) -> Self {
@@ -3657,6 +3678,7 @@ impl SaveReader {
             types,
             scope: Scope::root(),
             log: self.log,
+            error_to_raw: self.error_to_raw,
             schemas: schemas.clone(),
         };
 

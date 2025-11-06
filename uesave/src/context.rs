@@ -88,6 +88,7 @@ pub(crate) struct SaveGameArchive<S> {
     pub(crate) types: Rc<Types>,
     pub(crate) scope: Scope,
     pub(crate) log: bool,
+    pub(crate) error_to_raw: bool,
     pub(crate) schemas: Rc<RefCell<PropertySchemas>>,
 }
 impl<R: Read> Read for SaveGameArchive<R> {
@@ -120,6 +121,7 @@ impl<S> SaveGameArchive<S> {
             types: Rc::new(Types::new()),
             scope: Scope::root(),
             log: false,
+            error_to_raw: false,
             schemas: Rc::new(RefCell::new(PropertySchemas::new())),
         })
     }
@@ -146,6 +148,9 @@ impl<S> SaveGameArchive<S> {
     }
     pub(crate) fn log(&self) -> bool {
         self.log
+    }
+    pub(crate) fn error_to_raw(&self) -> bool {
+        self.error_to_raw
     }
 }
 impl<R: Read + Seek> SaveGameArchive<R> {

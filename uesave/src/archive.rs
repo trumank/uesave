@@ -65,6 +65,12 @@ pub trait ArchiveReader: Read + Seek {
     fn log(&self) -> bool {
         false
     }
+
+    /// Returns true if errors during property parsing should produce Raw properties instead of failing.
+    /// When false, parsing errors will immediately return an error.
+    fn error_to_raw(&self) -> bool {
+        false
+    }
 }
 
 pub trait ArchiveWriter: Write + Seek {
@@ -167,6 +173,10 @@ where
 
     fn log(&self) -> bool {
         SaveGameArchive::log(self)
+    }
+
+    fn error_to_raw(&self) -> bool {
+        SaveGameArchive::error_to_raw(self)
     }
 }
 impl<W> ArchiveWriter for SaveGameArchive<W>
