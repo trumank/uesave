@@ -3219,7 +3219,10 @@ impl<T: ArchiveType> Property<T> {
                 key_type,
                 value_type,
             } => {
-                ar.read_u32::<LE>()?;
+                // used to serialize negative difference against template object/CDO
+                let _keys_to_remove = read_array(ar.read_u32::<LE>()?, ar, |ar| {
+                    PropertyValue::read(ar, key_type)
+                })?;
                 let count = ar.read_u32::<LE>()?;
                 let mut value = vec![];
 
