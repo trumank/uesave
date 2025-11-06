@@ -13,11 +13,11 @@ text JSON format which can be used for manual save editing.
 ```
 use std::fs::File;
 
-use uesave::{Property, PropertyInner, Save};
+use uesave::{Property, Save};
 
 let save = Save::read(&mut File::open("drg-save-test.sav")?)?;
 match save.root.properties["NumberOfGamesPlayed"] {
-    Property { inner: PropertyInner::Int(value), .. } => {
+    Property::Int(value) => {
         assert_eq!(2173, value);
     }
     _ => {}
@@ -35,6 +35,7 @@ mod serialization;
 #[cfg(test)]
 mod tests;
 
+pub use archive::{ArchiveReader, ArchiveType, ArchiveWriter, SaveGameArchiveType};
 pub use context::{PropertySchemas, Types};
 pub use error::{Error, ParseError};
 
@@ -50,8 +51,6 @@ use std::{
 use serde::{de::Visitor, Deserialize, Deserializer, Serialize, Serializer};
 
 use tracing::instrument;
-
-use crate::archive::{ArchiveReader, ArchiveWriter};
 
 type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -348,39 +347,44 @@ impl Serialize for PropertyKey {
 }
 
 #[derive(Debug, Default, PartialEq, Serialize)]
-pub struct Properties(pub indexmap::IndexMap<PropertyKey, Property>);
-impl Properties {
-    fn insert(&mut self, k: impl Into<PropertyKey>, v: Property) -> Option<Property> {
+#[serde(bound(serialize = "T::ObjectRef: Serialize"))]
+pub struct Properties<T: ArchiveType = SaveGameArchiveType>(
+    pub indexmap::IndexMap<PropertyKey, Property<T>>,
+);
+impl<T: ArchiveType> Properties<T> {
+    fn insert(&mut self, k: impl Into<PropertyKey>, v: Property<T>) -> Option<Property<T>> {
         self.0.insert(k.into(), v)
     }
 }
-impl<K> std::ops::Index<K> for Properties
+impl<K, T: ArchiveType> std::ops::Index<K> for Properties<T>
 where
     K: Into<PropertyKey>,
 {
-    type Output = Property;
+    type Output = Property<T>;
     fn index(&self, index: K) -> &Self::Output {
         self.0.index(&index.into())
     }
 }
-impl<K> std::ops::IndexMut<K> for Properties
+impl<K, T: ArchiveType> std::ops::IndexMut<K> for Properties<T>
 where
     K: Into<PropertyKey>,
 {
-    fn index_mut(&mut self, index: K) -> &mut Property {
+    fn index_mut(&mut self, index: K) -> &mut Property<T> {
         self.0.index_mut(&index.into())
     }
 }
-impl<'a> IntoIterator for &'a Properties {
-    type Item = <&'a indexmap::IndexMap<PropertyKey, Property> as IntoIterator>::Item;
-    type IntoIter = <&'a indexmap::IndexMap<PropertyKey, Property> as IntoIterator>::IntoIter;
+impl<'a, T: ArchiveType> IntoIterator for &'a Properties<T> {
+    type Item = <&'a indexmap::IndexMap<PropertyKey, Property<T>> as IntoIterator>::Item;
+    type IntoIter = <&'a indexmap::IndexMap<PropertyKey, Property<T>> as IntoIterator>::IntoIter;
     fn into_iter(self) -> Self::IntoIter {
         self.0.iter()
     }
 }
 
 #[instrument(skip_all)]
-fn read_properties_until_none<A: ArchiveReader>(ar: &mut A) -> Result<Properties> {
+fn read_properties_until_none<T: ArchiveType, A: ArchiveReader<ArchiveType = T>>(
+    ar: &mut A,
+) -> Result<Properties<T>> {
     let mut properties = Properties::default();
     while let Some((name, prop)) = read_property(ar)? {
         properties.insert(name, prop);
@@ -388,9 +392,9 @@ fn read_properties_until_none<A: ArchiveReader>(ar: &mut A) -> Result<Properties
     Ok(properties)
 }
 #[instrument(skip_all)]
-fn write_properties_none_terminated<A: ArchiveWriter>(
+fn write_properties_none_terminated<T: ArchiveType, A: ArchiveWriter<ArchiveType = T>>(
     ar: &mut A,
-    properties: &Properties,
+    properties: &Properties<T>,
 ) -> Result<()> {
     for p in properties {
         write_property(p, ar)?;
@@ -400,12 +404,14 @@ fn write_properties_none_terminated<A: ArchiveWriter>(
 }
 
 #[instrument(skip_all)]
-fn read_property<A: ArchiveReader>(ar: &mut A) -> Result<Option<(PropertyKey, Property)>> {
+fn read_property<T: ArchiveType, A: ArchiveReader<ArchiveType = T>>(
+    ar: &mut A,
+) -> Result<Option<(PropertyKey, Property<T>)>> {
     if let Some(mut tag) = PropertyTagFull::read(ar)? {
         let tag_name = tag.name.to_string();
         let (value, updated_tag_data) = ar.with_scope(
             &tag_name,
-            |ar| -> Result<(Property, Option<PropertyTagDataFull>)> {
+            |ar| -> Result<(Property<T>, Option<PropertyTagDataFull>)> {
                 // Read the property - it may discover additional type information (e.g., struct types in arrays)
                 Property::read(ar, tag.clone())
             },
@@ -431,7 +437,10 @@ fn read_property<A: ArchiveReader>(ar: &mut A) -> Result<Option<(PropertyKey, Pr
     }
 }
 #[instrument(skip_all)]
-fn write_property<A: ArchiveWriter>(prop: (&PropertyKey, &Property), ar: &mut A) -> Result<()> {
+fn write_property<T: ArchiveType, A: ArchiveWriter<ArchiveType = T>>(
+    prop: (&PropertyKey, &Property<T>),
+    ar: &mut A,
+) -> Result<()> {
     ar.with_scope(&prop.0 .1, |ar| {
         let tag_partial = ar
             .get_schema(&ar.path())
@@ -656,7 +665,7 @@ impl PropertyTagDataFull {
     }
 }
 impl PropertyTagDataPartial {
-    fn into_full(self, prop: &Property) -> PropertyTagDataFull {
+    fn into_full<T: ArchiveType>(self, prop: &Property<T>) -> PropertyTagDataFull {
         match self {
             Self::Array(inner) => PropertyTagDataFull::Array(inner.into_full(prop).into()),
             Self::Struct { struct_type, id } => PropertyTagDataFull::Struct { struct_type, id },
@@ -737,12 +746,12 @@ bitflags::bitflags! {
     }
 }
 impl PropertyTagPartial {
-    fn into_full<'a>(
+    fn into_full<'a, T: ArchiveType>(
         self,
         name: &'a str,
         size: u32,
         index: u32,
-        prop: &Property,
+        prop: &Property<T>,
     ) -> PropertyTagFull<'a> {
         PropertyTagFull {
             name: name.into(),
@@ -1593,22 +1602,22 @@ impl Serialize for Double {
 }
 
 #[derive(Debug, PartialEq, Serialize)]
-pub struct MapEntry {
-    pub key: PropertyValue,
-    pub value: PropertyValue,
+pub struct MapEntry<T: ArchiveType = SaveGameArchiveType> {
+    pub key: PropertyValue<T>,
+    pub value: PropertyValue<T>,
 }
-impl MapEntry {
+impl<T: ArchiveType> MapEntry<T> {
     #[instrument(name = "MapEntry_read", skip_all)]
-    fn read<A: ArchiveReader>(
+    fn read<A: ArchiveReader<ArchiveType = T>>(
         ar: &mut A,
         key_type: &PropertyTagDataFull,
         value_type: &PropertyTagDataFull,
-    ) -> Result<MapEntry> {
+    ) -> Result<MapEntry<T>> {
         let key = PropertyValue::read(ar, key_type)?;
         let value = PropertyValue::read(ar, value_type)?;
         Ok(Self { key, value })
     }
-    fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
+    fn write<A: ArchiveWriter<ArchiveType = T>>(&self, ar: &mut A) -> Result<()> {
         self.key.write(ar)?;
         self.value.write(ar)?;
         Ok(())
@@ -2442,7 +2451,8 @@ pub enum ByteArray {
 
 #[derive(Debug, PartialEq, Serialize)]
 #[serde(untagged)]
-pub enum PropertyValue {
+#[serde(bound(serialize = "T::ObjectRef: Serialize"))]
+pub enum PropertyValue<T: ArchiveType = SaveGameArchiveType> {
     Int(Int),
     Int8(Int8),
     Int16(Int16),
@@ -2458,13 +2468,14 @@ pub enum PropertyValue {
     Str(String),
     SoftObject(SoftObjectPath),
     SoftObjectPath(SoftObjectPath),
-    Object(String),
-    Struct(StructValue),
+    Object(T::ObjectRef),
+    Struct(StructValue<T>),
 }
 
 #[derive(Debug, PartialEq, Serialize)]
 #[serde(untagged)]
-pub enum StructValue {
+#[serde(bound(serialize = "T::ObjectRef: Serialize"))]
+pub enum StructValue<T: ArchiveType = SaveGameArchiveType> {
     Guid(FGuid),
     DateTime(DateTime),
     Timespan(Timespan),
@@ -2483,13 +2494,17 @@ pub enum StructValue {
     /// Raw struct data for other unknown structs serialized with HasBinaryOrNativeSerialize
     Raw(Vec<u8>),
     /// User defined struct which is simply a list of properties
-    Struct(Properties),
+    Struct(Properties<T>),
 }
 
 /// Vectorized properties to avoid storing the variant with each value
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
-pub enum ValueVec {
+#[serde(bound(
+    serialize = "T::ObjectRef: Serialize",
+    deserialize = "T::ObjectRef: Deserialize<'de>"
+))]
+pub enum ValueVec<T: ArchiveType = SaveGameArchiveType> {
     Int8(Vec<Int8>),
     Int16(Vec<Int16>),
     Int(Vec<Int>),
@@ -2507,29 +2522,34 @@ pub enum ValueVec {
     Text(Vec<Text>),
     SoftObject(Vec<(String, String)>),
     Name(Vec<String>),
-    Object(Vec<String>),
+    Object(Vec<T::ObjectRef>),
     Box(Vec<Box>),
 }
 
 /// Encapsulates [`ValueVec`] with a special handling of structs. See also: [`ValueSet`]
 #[derive(Debug, PartialEq, Serialize)]
 #[serde(untagged)]
-pub enum ValueArray {
-    Base(ValueVec),
+#[serde(bound(serialize = "T::ObjectRef: Serialize"))]
+pub enum ValueArray<T: ArchiveType = SaveGameArchiveType> {
+    Base(ValueVec<T>),
     /// Array of structs - type information is stored in the property tag schema
-    Struct(Vec<StructValue>),
+    Struct(Vec<StructValue<T>>),
 }
 /// Encapsulates [`ValueVec`] with a special handling of structs. See also: [`ValueArray`]
 #[derive(Debug, PartialEq, Serialize)]
 #[serde(untagged)]
-pub enum ValueSet {
-    Base(ValueVec),
-    Struct(Vec<StructValue>),
+#[serde(bound(serialize = "T::ObjectRef: Serialize"))]
+pub enum ValueSet<T: ArchiveType = SaveGameArchiveType> {
+    Base(ValueVec<T>),
+    Struct(Vec<StructValue<T>>),
 }
 
-impl PropertyValue {
+impl<T: ArchiveType> PropertyValue<T> {
     #[instrument(name = "PropertyValue_read", skip_all)]
-    fn read<A: ArchiveReader>(ar: &mut A, t: &PropertyTagDataFull) -> Result<PropertyValue> {
+    fn read<A: ArchiveReader<ArchiveType = T>>(
+        ar: &mut A,
+        t: &PropertyTagDataFull,
+    ) -> Result<PropertyValue<T>> {
         Ok(match t {
             PropertyTagDataFull::Array(_) => unreachable!(),
             PropertyTagDataFull::Struct { struct_type, .. } => {
@@ -2559,7 +2579,7 @@ impl PropertyValue {
             },
         })
     }
-    fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
+    fn write<A: ArchiveWriter<ArchiveType = T>>(&self, ar: &mut A) -> Result<()> {
         match &self {
             PropertyValue::Int(v) => ar.write_i32::<LE>(*v)?,
             PropertyValue::Int8(v) => ar.write_i8(*v)?,
@@ -2585,9 +2605,12 @@ impl PropertyValue {
         Ok(())
     }
 }
-impl StructValue {
+impl<T: ArchiveType> StructValue<T> {
     #[instrument(name = "StructValue_read", skip_all)]
-    fn read<A: ArchiveReader>(ar: &mut A, t: &StructType) -> Result<StructValue> {
+    fn read<A: ArchiveReader<ArchiveType = T>>(
+        ar: &mut A,
+        t: &StructType,
+    ) -> Result<StructValue<T>> {
         Ok(match t {
             StructType::Guid => StructValue::Guid(FGuid::read(ar)?),
             StructType::DateTime => StructValue::DateTime(ar.read_u64::<LE>()?),
@@ -2610,7 +2633,7 @@ impl StructValue {
             StructType::Struct(_) => StructValue::Struct(read_properties_until_none(ar)?),
         })
     }
-    fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
+    fn write<A: ArchiveWriter<ArchiveType = T>>(&self, ar: &mut A) -> Result<()> {
         match self {
             StructValue::Guid(v) => v.write(ar)?,
             StructValue::DateTime(v) => ar.write_u64::<LE>(*v)?,
@@ -2633,14 +2656,14 @@ impl StructValue {
         Ok(())
     }
 }
-impl ValueVec {
+impl<T: ArchiveType> ValueVec<T> {
     #[instrument(name = "ValueVec_read", skip_all)]
-    fn read<A: ArchiveReader>(
+    fn read<A: ArchiveReader<ArchiveType = T>>(
         ar: &mut A,
         t: &PropertyType,
         size: u32,
         count: u32,
-    ) -> Result<ValueVec> {
+    ) -> Result<ValueVec<T>> {
         Ok(match t {
             PropertyType::IntProperty => {
                 ValueVec::Int(read_array(count, ar, |r| Ok(r.read_i32::<LE>()?))?)
@@ -2696,7 +2719,7 @@ impl ValueVec {
             _ => return Err(Error::UnknownVecType(format!("{t:?}"))),
         })
     }
-    fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
+    fn write<A: ArchiveWriter<ArchiveType = T>>(&self, ar: &mut A) -> Result<()> {
         match &self {
             ValueVec::Int8(v) => {
                 ar.write_u32::<LE>(v.len() as u32)?;
@@ -2819,13 +2842,13 @@ impl ValueVec {
         Ok(())
     }
 }
-impl ValueArray {
+impl<T: ArchiveType> ValueArray<T> {
     #[instrument(name = "ValueArray_read", skip_all)]
-    fn read<A: ArchiveReader>(
+    fn read<A: ArchiveReader<ArchiveType = T>>(
         ar: &mut A,
         tag: PropertyTagDataFull,
         size: u32,
-    ) -> Result<(ValueArray, Option<PropertyTagDataFull>)> {
+    ) -> Result<(ValueArray<T>, Option<PropertyTagDataFull>)> {
         let count = ar.read_u32::<LE>()?;
         Ok(match tag {
             PropertyTagDataFull::Struct { struct_type, id: _ } => {
@@ -2869,7 +2892,11 @@ impl ValueArray {
             ),
         })
     }
-    fn write<A: ArchiveWriter>(&self, ar: &mut A, tag: &PropertyTagFull) -> Result<()> {
+    fn write<A: ArchiveWriter<ArchiveType = T>>(
+        &self,
+        ar: &mut A,
+        tag: &PropertyTagFull,
+    ) -> Result<()> {
         match &self {
             ValueArray::Struct(value) => {
                 ar.write_u32::<LE>(value.len() as u32)?;
@@ -2925,9 +2952,13 @@ impl ValueArray {
         Ok(())
     }
 }
-impl ValueSet {
+impl<T: ArchiveType> ValueSet<T> {
     #[instrument(name = "ValueSet_read", skip_all)]
-    fn read<A: ArchiveReader>(ar: &mut A, t: &PropertyTagDataFull, size: u32) -> Result<ValueSet> {
+    fn read<A: ArchiveReader<ArchiveType = T>>(
+        ar: &mut A,
+        t: &PropertyTagDataFull,
+        size: u32,
+    ) -> Result<ValueSet<T>> {
         let count = ar.read_u32::<LE>()?;
         Ok(match t {
             PropertyTagDataFull::Struct { struct_type, .. } => {
@@ -2938,7 +2969,7 @@ impl ValueSet {
             _ => ValueSet::Base(ValueVec::read(ar, &t.basic_type(), size, count)?),
         })
     }
-    fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
+    fn write<A: ArchiveWriter<ArchiveType = T>>(&self, ar: &mut A) -> Result<()> {
         match &self {
             ValueSet::Struct(value) => {
                 ar.write_u32::<LE>(value.len() as u32)?;
@@ -2958,7 +2989,7 @@ impl ValueSet {
 /// Property schemas (tags) are stored separately in [`PropertySchemas`]
 #[derive(Debug, PartialEq, Serialize)]
 #[serde(untagged)]
-pub enum Property {
+pub enum Property<T: ArchiveType = SaveGameArchiveType> {
     Int8(Int8),
     Int16(Int16),
     Int(Int),
@@ -2976,26 +3007,26 @@ pub enum Property {
     FieldPath(FieldPath),
     SoftObject(SoftObjectPath),
     Name(String),
-    Object(String),
+    Object(T::ObjectRef),
     Text(Text),
     Delegate(Delegate),
     MulticastDelegate(MulticastDelegate),
     MulticastInlineDelegate(MulticastInlineDelegate),
     MulticastSparseDelegate(MulticastSparseDelegate),
-    Set(ValueSet),
-    Map(Vec<MapEntry>),
-    Struct(StructValue),
-    Array(ValueArray),
+    Set(ValueSet<T>),
+    Map(Vec<MapEntry<T>>),
+    Struct(StructValue<T>),
+    Array(ValueArray<T>),
     /// Raw property data when parsing fails
     Raw(Vec<u8>),
 }
 
-impl Property {
+impl<T: ArchiveType> Property<T> {
     #[instrument(name = "Property_read", skip_all)]
-    fn read<A: ArchiveReader>(
+    fn read<A: ArchiveReader<ArchiveType = T>>(
         ar: &mut A,
         tag: PropertyTagFull,
-    ) -> Result<(Property, Option<PropertyTagDataFull>)> {
+    ) -> Result<(Property<T>, Option<PropertyTagDataFull>)> {
         if tag.data.has_raw_struct() {
             let mut raw = vec![0; tag.size as usize];
             ar.read_exact(&mut raw)?;
@@ -3022,10 +3053,10 @@ impl Property {
         Ok((inner, updated_tag_data))
     }
 
-    fn try_read_inner<A: ArchiveReader>(
+    fn try_read_inner<A: ArchiveReader<ArchiveType = T>>(
         ar: &mut A,
         tag: &PropertyTagFull,
-    ) -> Result<(Property, Option<PropertyTagDataFull>)> {
+    ) -> Result<(Property<T>, Option<PropertyTagDataFull>)> {
         let (inner, updated_tag_data) = match &tag.data {
             PropertyTagDataFull::Bool(value) => (Property::Bool(*value), None),
             PropertyTagDataFull::Byte(ref enum_type) => {
@@ -3113,7 +3144,11 @@ impl Property {
 
         Ok((inner, updated_tag))
     }
-    fn write<A: ArchiveWriter>(&self, ar: &mut A, tag: &PropertyTagFull) -> Result<()> {
+    fn write<A: ArchiveWriter<ArchiveType = T>>(
+        &self,
+        ar: &mut A,
+        tag: &PropertyTagFull,
+    ) -> Result<()> {
         match &self {
             Property::Int8(value) => {
                 ar.write_i8(*value)?;
@@ -3382,7 +3417,7 @@ pub struct Root {
 }
 impl Root {
     #[instrument(name = "Root_read", skip_all)]
-    fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
+    fn read<A: ArchiveReader<ArchiveType = SaveGameArchiveType>>(ar: &mut A) -> Result<Self> {
         let save_game_type = ar.read_string()?;
         if ar.version().property_tag() {
             ar.read_u8()?;
@@ -3393,7 +3428,7 @@ impl Root {
             properties,
         })
     }
-    fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
+    fn write<A: ArchiveWriter<ArchiveType = SaveGameArchiveType>>(&self, ar: &mut A) -> Result<()> {
         ar.write_string(&self.save_game_type)?;
         if ar.version().property_tag() {
             ar.write_u8(0)?;
