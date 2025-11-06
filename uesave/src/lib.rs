@@ -1627,8 +1627,8 @@ impl Serialize for Double {
 
 #[derive(Debug, PartialEq, Serialize)]
 pub struct MapEntry<T: ArchiveType = SaveGameArchiveType> {
-    pub key: PropertyValue<T>,
-    pub value: PropertyValue<T>,
+    pub key: Property<T>,
+    pub value: Property<T>,
 }
 impl<T: ArchiveType> MapEntry<T> {
     #[instrument(name = "MapEntry_read", skip_all)]
@@ -1637,13 +1637,13 @@ impl<T: ArchiveType> MapEntry<T> {
         key_type: &PropertyTagDataFull,
         value_type: &PropertyTagDataFull,
     ) -> Result<MapEntry<T>> {
-        let key = PropertyValue::read(ar, key_type)?;
-        let value = PropertyValue::read(ar, value_type)?;
+        let key = Property::read_value(ar, key_type)?;
+        let value = Property::read_value(ar, value_type)?;
         Ok(Self { key, value })
     }
     fn write<A: ArchiveWriter<ArchiveType = T>>(&self, ar: &mut A) -> Result<()> {
-        self.key.write(ar)?;
-        self.value.write(ar)?;
+        self.key.write_value(ar)?;
+        self.value.write_value(ar)?;
         Ok(())
     }
 }
@@ -2607,29 +2607,6 @@ pub enum ByteArray {
 #[derive(Debug, PartialEq, Serialize)]
 #[serde(untagged)]
 #[serde(bound(serialize = "T::ObjectRef: Serialize, T::SoftObjectPath: Serialize"))]
-pub enum PropertyValue<T: ArchiveType = SaveGameArchiveType> {
-    Int(Int),
-    Int8(Int8),
-    Int16(Int16),
-    Int64(Int64),
-    UInt16(UInt16),
-    UInt32(UInt32),
-    Float(Float),
-    Double(Double),
-    Bool(Bool),
-    Byte(Byte),
-    Enum(Enum),
-    Name(String),
-    Str(String),
-    SoftObject(T::SoftObjectPath),
-    SoftObjectPath(T::SoftObjectPath),
-    Object(T::ObjectRef),
-    Struct(StructValue<T>),
-}
-
-#[derive(Debug, PartialEq, Serialize)]
-#[serde(untagged)]
-#[serde(bound(serialize = "T::ObjectRef: Serialize, T::SoftObjectPath: Serialize"))]
 pub enum StructValue<T: ArchiveType = SaveGameArchiveType> {
     Guid(FGuid),
     DateTime(DateTime),
@@ -2683,67 +2660,6 @@ pub enum ValueVec<T: ArchiveType = SaveGameArchiveType> {
     Struct(Vec<StructValue<T>>),
 }
 
-impl<T: ArchiveType> PropertyValue<T> {
-    #[instrument(name = "PropertyValue_read", skip_all)]
-    fn read<A: ArchiveReader<ArchiveType = T>>(
-        ar: &mut A,
-        t: &PropertyTagDataFull,
-    ) -> Result<PropertyValue<T>> {
-        Ok(match t {
-            PropertyTagDataFull::Array(_) => unreachable!(),
-            PropertyTagDataFull::Struct { struct_type, .. } => {
-                PropertyValue::Struct(StructValue::read(ar, struct_type)?)
-            }
-            PropertyTagDataFull::Set { .. } => unreachable!(),
-            PropertyTagDataFull::Map { .. } => unreachable!(),
-            PropertyTagDataFull::Byte(_) => PropertyValue::Byte(Byte::Label(ar.read_string()?)),
-            PropertyTagDataFull::Enum(_, _) => PropertyValue::Enum(ar.read_string()?),
-            PropertyTagDataFull::Bool(_) => PropertyValue::Bool(ar.read_u8()? > 0),
-            PropertyTagDataFull::Other(property_type) => match property_type {
-                PropertyType::IntProperty => PropertyValue::Int(ar.read_i32::<LE>()?),
-                PropertyType::Int8Property => PropertyValue::Int8(ar.read_i8()?),
-                PropertyType::Int16Property => PropertyValue::Int16(ar.read_i16::<LE>()?),
-                PropertyType::Int64Property => PropertyValue::Int64(ar.read_i64::<LE>()?),
-                PropertyType::UInt16Property => PropertyValue::UInt16(ar.read_u16::<LE>()?),
-                PropertyType::UInt32Property => PropertyValue::UInt32(ar.read_u32::<LE>()?),
-                PropertyType::FloatProperty => PropertyValue::Float(ar.read_f32::<LE>()?.into()),
-                PropertyType::DoubleProperty => PropertyValue::Double(ar.read_f64::<LE>()?.into()),
-                PropertyType::NameProperty => PropertyValue::Name(ar.read_string()?),
-                PropertyType::StrProperty => PropertyValue::Str(read_string(ar)?),
-                PropertyType::SoftObjectProperty => {
-                    PropertyValue::SoftObject(ar.read_soft_object_path()?)
-                }
-                PropertyType::ObjectProperty => PropertyValue::Object(ar.read_object_ref()?),
-                _ => return Err(Error::Other(format!("unimplemented property {t:?}"))),
-            },
-        })
-    }
-    fn write<A: ArchiveWriter<ArchiveType = T>>(&self, ar: &mut A) -> Result<()> {
-        match &self {
-            PropertyValue::Int(v) => ar.write_i32::<LE>(*v)?,
-            PropertyValue::Int8(v) => ar.write_i8(*v)?,
-            PropertyValue::Int16(v) => ar.write_i16::<LE>(*v)?,
-            PropertyValue::Int64(v) => ar.write_i64::<LE>(*v)?,
-            PropertyValue::UInt16(v) => ar.write_u16::<LE>(*v)?,
-            PropertyValue::UInt32(v) => ar.write_u32::<LE>(*v)?,
-            PropertyValue::Float(v) => ar.write_f32::<LE>((*v).into())?,
-            PropertyValue::Double(v) => ar.write_f64::<LE>((*v).into())?,
-            PropertyValue::Bool(v) => ar.write_u8(u8::from(*v))?,
-            PropertyValue::Name(v) => ar.write_string(v)?,
-            PropertyValue::Str(v) => write_string(ar, v)?,
-            PropertyValue::SoftObject(v) => ar.write_soft_object_path(v)?,
-            PropertyValue::SoftObjectPath(v) => ar.write_soft_object_path(v)?,
-            PropertyValue::Object(v) => ar.write_object_ref(v)?,
-            PropertyValue::Byte(v) => match v {
-                Byte::Byte(b) => ar.write_u8(*b)?,
-                Byte::Label(l) => ar.write_string(l)?,
-            },
-            PropertyValue::Enum(v) => ar.write_string(v)?,
-            PropertyValue::Struct(v) => v.write(ar)?,
-        };
-        Ok(())
-    }
-}
 impl<T: ArchiveType> StructValue<T> {
     #[instrument(name = "StructValue_read", skip_all)]
     fn read<A: ArchiveReader<ArchiveType = T>>(
@@ -3204,16 +3120,7 @@ impl<T: ArchiveType> Property<T> {
         tag: &PropertyTagFull,
     ) -> Result<(Property<T>, Option<PropertyTagDataFull>)> {
         let (inner, updated_tag_data) = match &tag.data {
-            PropertyTagDataFull::Bool(value) => (Property::Bool(*value), None),
-            PropertyTagDataFull::Byte(ref enum_type) => {
-                let value = if enum_type.is_none() {
-                    Byte::Byte(ar.read_u8()?)
-                } else {
-                    Byte::Label(ar.read_string()?)
-                };
-                (Property::Byte(value), None)
-            }
-            PropertyTagDataFull::Enum { .. } => (Property::Enum(ar.read_string()?), None),
+            // Collection types need special handling
             PropertyTagDataFull::Set { key_type } => {
                 ar.read_u32::<LE>()?;
                 (
@@ -3227,7 +3134,7 @@ impl<T: ArchiveType> Property<T> {
             } => {
                 // used to serialize negative difference against template object/CDO
                 let _keys_to_remove = read_array(ar.read_u32::<LE>()?, ar, |ar| {
-                    PropertyValue::read(ar, key_type)
+                    Property::read_value(ar, key_type)
                 })?;
                 let count = ar.read_u32::<LE>()?;
                 let mut value = vec![];
@@ -3238,53 +3145,32 @@ impl<T: ArchiveType> Property<T> {
 
                 (Property::Map(value), None)
             }
-            PropertyTagDataFull::Struct { struct_type, .. } => {
-                (Property::Struct(StructValue::read(ar, struct_type)?), None)
-            }
             PropertyTagDataFull::Array(data) => {
                 let (array, updated_data) = ValueVec::read_array(ar, *data.clone(), tag.size - 4)?;
                 (Property::Array(array), updated_data)
             }
-            PropertyTagDataFull::Other(t) => (
-                match t {
-                    PropertyType::BoolProperty
-                    | PropertyType::ByteProperty
-                    | PropertyType::EnumProperty
-                    | PropertyType::SetProperty
-                    | PropertyType::MapProperty
-                    | PropertyType::StructProperty
-                    | PropertyType::ArrayProperty => unreachable!(),
-                    PropertyType::Int8Property => Property::Int8(ar.read_i8()?),
-                    PropertyType::Int16Property => Property::Int16(ar.read_i16::<LE>()?),
-                    PropertyType::IntProperty => Property::Int(ar.read_i32::<LE>()?),
-                    PropertyType::Int64Property => Property::Int64(ar.read_i64::<LE>()?),
-                    PropertyType::UInt8Property => Property::UInt8(ar.read_u8()?),
-                    PropertyType::UInt16Property => Property::UInt16(ar.read_u16::<LE>()?),
-                    PropertyType::UInt32Property => Property::UInt32(ar.read_u32::<LE>()?),
-                    PropertyType::UInt64Property => Property::UInt64(ar.read_u64::<LE>()?),
-                    PropertyType::FloatProperty => Property::Float(ar.read_f32::<LE>()?.into()),
-                    PropertyType::DoubleProperty => Property::Double(ar.read_f64::<LE>()?.into()),
-                    PropertyType::NameProperty => Property::Name(ar.read_string()?),
-                    PropertyType::StrProperty => Property::Str(read_string(ar)?),
-                    PropertyType::FieldPathProperty => Property::FieldPath(FieldPath::read(ar)?),
-                    PropertyType::SoftObjectProperty => {
-                        Property::SoftObject(ar.read_soft_object_path()?)
-                    }
-                    PropertyType::ObjectProperty => Property::Object(ar.read_object_ref()?),
-                    PropertyType::TextProperty => Property::Text(Text::read(ar)?),
-                    PropertyType::DelegateProperty => Property::Delegate(Delegate::read(ar)?),
-                    PropertyType::MulticastDelegateProperty => {
-                        Property::MulticastDelegate(MulticastDelegate::read(ar)?)
-                    }
-                    PropertyType::MulticastInlineDelegateProperty => {
-                        Property::MulticastInlineDelegate(MulticastInlineDelegate::read(ar)?)
-                    }
-                    PropertyType::MulticastSparseDelegateProperty => {
-                        Property::MulticastSparseDelegate(MulticastSparseDelegate::read(ar)?)
-                    }
-                },
+            // Bool is special - value stored in tag for top-level properties
+            PropertyTagDataFull::Bool(value) => (Property::Bool(*value), None),
+            PropertyTagDataFull::Other(PropertyType::FieldPathProperty) => {
+                (Property::FieldPath(FieldPath::read(ar)?), None)
+            }
+            PropertyTagDataFull::Other(PropertyType::DelegateProperty) => {
+                (Property::Delegate(Delegate::read(ar)?), None)
+            }
+            PropertyTagDataFull::Other(PropertyType::MulticastDelegateProperty) => (
+                Property::MulticastDelegate(MulticastDelegate::read(ar)?),
                 None,
             ),
+            PropertyTagDataFull::Other(PropertyType::MulticastInlineDelegateProperty) => (
+                Property::MulticastInlineDelegate(MulticastInlineDelegate::read(ar)?),
+                None,
+            ),
+            PropertyTagDataFull::Other(PropertyType::MulticastSparseDelegateProperty) => (
+                Property::MulticastSparseDelegate(MulticastSparseDelegate::read(ar)?),
+                None,
+            ),
+            // Everything else can use the shared read_value logic
+            _ => (Property::read_value(ar, &tag.data)?, None),
         };
 
         // If we got updated tag data (e.g., from array of structs), wrap it in an Array tag
@@ -3299,64 +3185,24 @@ impl<T: ArchiveType> Property<T> {
         tag: &PropertyTagFull,
     ) -> Result<()> {
         match &self {
-            Property::Int8(value) => {
-                ar.write_i8(*value)?;
-            }
-            Property::Int16(value) => {
-                ar.write_i16::<LE>(*value)?;
-            }
-            Property::Int(value) => {
-                ar.write_i32::<LE>(*value)?;
-            }
-            Property::Int64(value) => {
-                ar.write_i64::<LE>(*value)?;
-            }
-            Property::UInt8(value) => {
-                ar.write_u8(*value)?;
-            }
-            Property::UInt16(value) => {
-                ar.write_u16::<LE>(*value)?;
-            }
-            Property::UInt32(value) => {
-                ar.write_u32::<LE>(*value)?;
-            }
-            Property::UInt64(value) => {
-                ar.write_u64::<LE>(*value)?;
-            }
-            Property::Float(value) => {
-                ar.write_f32::<LE>((*value).into())?;
-            }
-            Property::Double(value) => {
-                ar.write_f64::<LE>((*value).into())?;
-            }
-            Property::Bool(_) => {}
-            Property::Byte(value) => match value {
-                Byte::Byte(b) => {
-                    ar.write_u8(*b)?;
-                }
-                Byte::Label(l) => {
-                    ar.write_string(l)?;
-                }
-            },
-            Property::Enum(value) => {
-                ar.write_string(value)?;
-            }
-            Property::Name(value) => {
-                ar.write_string(value)?;
-            }
-            Property::Str(value) => {
-                ar.write_string(value)?;
-            }
-            Property::FieldPath(value) => {
+            Property::Set(value) => {
+                ar.write_u32::<LE>(0)?;
                 value.write(ar)?;
             }
-            Property::SoftObject(value) => {
-                ar.write_soft_object_path(value)?;
+            Property::Map(value) => {
+                ar.write_u32::<LE>(0)?;
+                ar.write_u32::<LE>(value.len() as u32)?;
+                for v in value {
+                    v.write(ar)?;
+                }
             }
-            Property::Object(value) => {
-                ar.write_object_ref(value)?;
+            Property::Array(value) => {
+                value.write_array(ar, tag)?;
             }
-            Property::Text(value) => {
+            Property::Raw(value) => {
+                ar.write_all(value)?;
+            }
+            Property::FieldPath(value) => {
                 value.write(ar)?;
             }
             Property::Delegate(value) => {
@@ -3371,27 +3217,117 @@ impl<T: ArchiveType> Property<T> {
             Property::MulticastSparseDelegate(value) => {
                 value.write(ar)?;
             }
-            Property::Set(value) => {
-                ar.write_u32::<LE>(0)?;
-                value.write(ar)?;
-            }
-            Property::Map(value) => {
-                ar.write_u32::<LE>(0)?;
-                ar.write_u32::<LE>(value.len() as u32)?;
-                for v in value {
-                    v.write(ar)?;
-                }
-            }
-            Property::Struct(value) => {
-                value.write(ar)?;
-            }
-            Property::Array(value) => {
-                value.write_array(ar, tag)?;
-            }
-            Property::Raw(value) => {
-                ar.write_all(value)?;
-            }
+            // Bool is special - it's stored in the tag, not in the data
+            Property::Bool(_) => {}
+            // Everything else uses shared write_value logic
+            _ => self.write_value(ar)?,
         }
+        Ok(())
+    }
+
+    #[instrument(name = "Property_read_value", skip_all)]
+    fn read_value<A: ArchiveReader<ArchiveType = T>>(
+        ar: &mut A,
+        t: &PropertyTagDataFull,
+    ) -> Result<Property<T>> {
+        Ok(match t {
+            PropertyTagDataFull::Array(_) => {
+                unreachable!("Arrays should be handled at property level")
+            }
+            PropertyTagDataFull::Set { .. } => {
+                unreachable!("Sets should be handled at property level")
+            }
+            PropertyTagDataFull::Map { .. } => {
+                unreachable!("Maps should be handled at property level")
+            }
+            PropertyTagDataFull::Struct { struct_type, .. } => {
+                Property::Struct(StructValue::read(ar, struct_type)?)
+            }
+            PropertyTagDataFull::Byte(ref enum_type) => {
+                let value = if enum_type.is_none() {
+                    Byte::Byte(ar.read_u8()?)
+                } else {
+                    Byte::Label(ar.read_string()?)
+                };
+                Property::Byte(value)
+            }
+            PropertyTagDataFull::Enum(_, _) => Property::Enum(ar.read_string()?),
+            PropertyTagDataFull::Bool(_) => Property::Bool(ar.read_u8()? > 0),
+            PropertyTagDataFull::Other(property_type) => match property_type {
+                PropertyType::BoolProperty
+                | PropertyType::ByteProperty
+                | PropertyType::EnumProperty
+                | PropertyType::SetProperty
+                | PropertyType::MapProperty
+                | PropertyType::StructProperty
+                | PropertyType::ArrayProperty
+                | PropertyType::FieldPathProperty
+                | PropertyType::DelegateProperty
+                | PropertyType::MulticastDelegateProperty
+                | PropertyType::MulticastInlineDelegateProperty
+                | PropertyType::MulticastSparseDelegateProperty => {
+                    unreachable!("Should be handled by dedicated tag variants")
+                }
+                PropertyType::Int8Property => Property::Int8(ar.read_i8()?),
+                PropertyType::Int16Property => Property::Int16(ar.read_i16::<LE>()?),
+                PropertyType::IntProperty => Property::Int(ar.read_i32::<LE>()?),
+                PropertyType::Int64Property => Property::Int64(ar.read_i64::<LE>()?),
+                PropertyType::UInt8Property => Property::UInt8(ar.read_u8()?),
+                PropertyType::UInt16Property => Property::UInt16(ar.read_u16::<LE>()?),
+                PropertyType::UInt32Property => Property::UInt32(ar.read_u32::<LE>()?),
+                PropertyType::UInt64Property => Property::UInt64(ar.read_u64::<LE>()?),
+                PropertyType::FloatProperty => Property::Float(ar.read_f32::<LE>()?.into()),
+                PropertyType::DoubleProperty => Property::Double(ar.read_f64::<LE>()?.into()),
+                PropertyType::NameProperty => Property::Name(ar.read_string()?),
+                PropertyType::StrProperty => Property::Str(read_string(ar)?),
+                PropertyType::SoftObjectProperty => {
+                    Property::SoftObject(ar.read_soft_object_path()?)
+                }
+                PropertyType::ObjectProperty => Property::Object(ar.read_object_ref()?),
+                PropertyType::TextProperty => Property::Text(Text::read(ar)?),
+            },
+        })
+    }
+
+    fn write_value<A: ArchiveWriter<ArchiveType = T>>(&self, ar: &mut A) -> Result<()> {
+        match &self {
+            Property::Int8(v) => ar.write_i8(*v)?,
+            Property::Int16(v) => ar.write_i16::<LE>(*v)?,
+            Property::Int(v) => ar.write_i32::<LE>(*v)?,
+            Property::Int64(v) => ar.write_i64::<LE>(*v)?,
+            Property::UInt8(v) => ar.write_u8(*v)?,
+            Property::UInt16(v) => ar.write_u16::<LE>(*v)?,
+            Property::UInt32(v) => ar.write_u32::<LE>(*v)?,
+            Property::UInt64(v) => ar.write_u64::<LE>(*v)?,
+            Property::Float(v) => ar.write_f32::<LE>((*v).into())?,
+            Property::Double(v) => ar.write_f64::<LE>((*v).into())?,
+            Property::Bool(v) => ar.write_u8(u8::from(*v))?,
+            Property::Byte(v) => match v {
+                Byte::Byte(b) => ar.write_u8(*b)?,
+                Byte::Label(l) => ar.write_string(l)?,
+            },
+            Property::Enum(v) => ar.write_string(v)?,
+            Property::Name(v) => ar.write_string(v)?,
+            Property::Str(v) => write_string(ar, v)?,
+            Property::SoftObject(v) => ar.write_soft_object_path(v)?,
+            Property::Object(v) => ar.write_object_ref(v)?,
+            Property::Text(v) => v.write(ar)?,
+            Property::Struct(v) => v.write(ar)?,
+            Property::Set(_)
+            | Property::Map(_)
+            | Property::Array(_)
+            | Property::FieldPath(_)
+            | Property::Delegate(_)
+            | Property::MulticastDelegate(_)
+            | Property::MulticastInlineDelegate(_)
+            | Property::MulticastSparseDelegate(_)
+            | Property::Raw(_) => {
+                return Err(Error::Other(format!(
+                    "Property variant {:?} cannot be written in value context (Maps/Sets/Arrays)",
+                    self
+                )))
+            }
+        };
         Ok(())
     }
 }

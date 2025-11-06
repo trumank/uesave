@@ -1,6 +1,6 @@
 use crate::{
-    Properties, Property, PropertyKey, PropertySchemas, PropertyTagDataPartial, PropertyValue,
-    Root, Save, SoftObjectPath, StructType, StructValue, ValueVec,
+    Properties, Property, PropertyKey, PropertySchemas, PropertyTagDataPartial, Root, Save,
+    SoftObjectPath, StructType, StructValue, ValueVec,
 };
 use serde::{
     de::{DeserializeSeed, MapAccess, SeqAccess, Visitor},
@@ -368,14 +368,14 @@ impl<'de, 'a> DeserializeSeed<'de> for MapEntrySeed<'a> {
                 while let Some(field) = map.next_key()? {
                     match field {
                         Field::Key => {
-                            key = Some(map.next_value_seed(PropertyValueSeed {
+                            key = Some(map.next_value_seed(PropertySeed {
                                 tag: self.key_type,
                                 path: self.path,
                                 schemas: self.schemas,
                             })?);
                         }
                         Field::Value => {
-                            value = Some(map.next_value_seed(PropertyValueSeed {
+                            value = Some(map.next_value_seed(PropertySeed {
                                 tag: self.value_type,
                                 path: self.path,
                                 schemas: self.schemas,
@@ -401,102 +401,6 @@ impl<'de, 'a> DeserializeSeed<'de> for MapEntrySeed<'a> {
                 schemas: self.schemas,
             },
         )
-    }
-}
-
-struct PropertyValueSeed<'a> {
-    tag: &'a PropertyTagDataPartial,
-    path: &'a str,
-    schemas: &'a PropertySchemas,
-}
-
-impl<'de, 'a> DeserializeSeed<'de> for PropertyValueSeed<'a> {
-    type Value = PropertyValue;
-
-    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        use crate::PropertyType;
-        match &self.tag {
-            PropertyTagDataPartial::Other(pt) => match pt {
-                PropertyType::IntProperty => {
-                    Ok(PropertyValue::Int(i32::deserialize(deserializer)?))
-                }
-                PropertyType::Int8Property => {
-                    Ok(PropertyValue::Int8(i8::deserialize(deserializer)?))
-                }
-                PropertyType::Int16Property => {
-                    Ok(PropertyValue::Int16(i16::deserialize(deserializer)?))
-                }
-                PropertyType::Int64Property => {
-                    Ok(PropertyValue::Int64(i64::deserialize(deserializer)?))
-                }
-                PropertyType::UInt16Property => {
-                    Ok(PropertyValue::UInt16(u16::deserialize(deserializer)?))
-                }
-                PropertyType::UInt32Property => {
-                    Ok(PropertyValue::UInt32(u32::deserialize(deserializer)?))
-                }
-                PropertyType::FloatProperty => {
-                    Ok(PropertyValue::Float(f32::deserialize(deserializer)?.into()))
-                }
-                PropertyType::DoubleProperty => Ok(PropertyValue::Double(
-                    f64::deserialize(deserializer)?.into(),
-                )),
-                PropertyType::BoolProperty => {
-                    Ok(PropertyValue::Bool(bool::deserialize(deserializer)?))
-                }
-                PropertyType::NameProperty => {
-                    Ok(PropertyValue::Name(String::deserialize(deserializer)?))
-                }
-                PropertyType::StrProperty => {
-                    Ok(PropertyValue::Str(String::deserialize(deserializer)?))
-                }
-                PropertyType::ObjectProperty => {
-                    Ok(PropertyValue::Object(String::deserialize(deserializer)?))
-                }
-                PropertyType::SoftObjectProperty => Ok(PropertyValue::SoftObject(
-                    crate::SoftObjectPath::deserialize(deserializer)?,
-                )),
-                // PropertyValue doesn't support these types - they should use dedicated variants or shouldn't appear here
-                PropertyType::UInt8Property
-                | PropertyType::UInt64Property
-                | PropertyType::ByteProperty
-                | PropertyType::EnumProperty
-                | PropertyType::TextProperty
-                | PropertyType::FieldPathProperty
-                | PropertyType::DelegateProperty
-                | PropertyType::MulticastDelegateProperty
-                | PropertyType::MulticastInlineDelegateProperty
-                | PropertyType::MulticastSparseDelegateProperty
-                | PropertyType::ArrayProperty
-                | PropertyType::SetProperty
-                | PropertyType::MapProperty
-                | PropertyType::StructProperty => Err(serde::de::Error::custom(format!(
-                    "Property type {:?} is not supported in PropertyValue",
-                    pt
-                ))),
-            },
-            PropertyTagDataPartial::Byte(_enum_type) => {
-                Ok(PropertyValue::Byte(crate::Byte::deserialize(deserializer)?))
-            }
-            PropertyTagDataPartial::Enum(_, _) => {
-                Ok(PropertyValue::Enum(String::deserialize(deserializer)?))
-            }
-            PropertyTagDataPartial::Struct { struct_type, .. } => {
-                let sv = StructValueSeed {
-                    struct_type,
-                    path: self.path,
-                    schemas: self.schemas,
-                }
-                .deserialize(deserializer)?;
-                Ok(PropertyValue::Struct(sv))
-            }
-            _ => Err(serde::de::Error::custom(
-                "Unexpected property tag type for PropertyValue",
-            )),
-        }
     }
 }
 
