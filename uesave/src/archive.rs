@@ -21,6 +21,9 @@ pub trait ArchiveReader: Read + Seek {
     /// Read a string with trailing bytes from the archive
     fn read_string_trailing(&mut self) -> Result<(String, Vec<u8>)>;
 
+    /// Read an object reference from the archive
+    fn read_object_ref(&mut self) -> Result<String>;
+
     /// Returns true if diagnostic logging is enabled
     fn log(&self) -> bool {
         false
@@ -38,6 +41,9 @@ pub trait ArchiveWriter: Write + Seek {
 
     /// Write a string with trailing bytes to the archive
     fn write_string_trailing(&mut self, string: &str, trailing: Option<&[u8]>) -> Result<()>;
+
+    /// Write an object reference to the archive
+    fn write_object_ref(&mut self, object_ref: &str) -> Result<()>;
 
     /// Returns true if diagnostic logging is enabled
     fn log(&self) -> bool {
@@ -72,6 +78,10 @@ where
         crate::read_string_trailing(self)
     }
 
+    fn read_object_ref(&mut self) -> Result<String> {
+        crate::read_string(self)
+    }
+
     fn log(&self) -> bool {
         Context::log(self)
     }
@@ -94,6 +104,10 @@ where
 
     fn write_string_trailing(&mut self, string: &str, trailing: Option<&[u8]>) -> Result<()> {
         crate::write_string_trailing(self, string, trailing)
+    }
+
+    fn write_object_ref(&mut self, object_ref: &str) -> Result<()> {
+        crate::write_string(self, object_ref)
     }
 
     fn log(&self) -> bool {

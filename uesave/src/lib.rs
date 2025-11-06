@@ -2531,7 +2531,7 @@ impl PropertyValue {
                 PropertyType::SoftObjectProperty => {
                     PropertyValue::SoftObject(SoftObjectPath::read(ar)?)
                 }
-                PropertyType::ObjectProperty => PropertyValue::Object(ar.read_string()?),
+                PropertyType::ObjectProperty => PropertyValue::Object(ar.read_object_ref()?),
                 _ => return Err(Error::Other(format!("unimplemented property {t:?}"))),
             },
         })
@@ -2551,7 +2551,7 @@ impl PropertyValue {
             PropertyValue::Str(v) => ar.write_string(v)?,
             PropertyValue::SoftObject(v) => v.write(ar)?,
             PropertyValue::SoftObjectPath(v) => v.write(ar)?,
-            PropertyValue::Object(v) => ar.write_string(v)?,
+            PropertyValue::Object(v) => ar.write_object_ref(v)?,
             PropertyValue::Byte(v) => match v {
                 Byte::Byte(b) => ar.write_u8(*b)?,
                 Byte::Label(l) => ar.write_string(l)?,
@@ -2668,7 +2668,7 @@ impl ValueVec {
                 ValueVec::Name(read_array(count, ar, |r| r.read_string())?)
             }
             PropertyType::ObjectProperty => {
-                ValueVec::Object(read_array(count, ar, |r| r.read_string())?)
+                ValueVec::Object(read_array(count, ar, |r| r.read_object_ref())?)
             }
             _ => return Err(Error::UnknownVecType(format!("{t:?}"))),
         })
@@ -2761,10 +2761,16 @@ impl ValueVec {
                     ar.write_string(i)?;
                 }
             }
-            ValueVec::Str(v) | ValueVec::Object(v) | ValueVec::Name(v) => {
+            ValueVec::Str(v) | ValueVec::Name(v) => {
                 ar.write_u32::<LE>(v.len() as u32)?;
                 for i in v {
                     ar.write_string(i)?;
+                }
+            }
+            ValueVec::Object(v) => {
+                ar.write_u32::<LE>(v.len() as u32)?;
+                for i in v {
+                    ar.write_object_ref(i)?;
                 }
             }
             ValueVec::Text(v) => {
@@ -3052,7 +3058,7 @@ impl Property {
                 PropertyType::SoftObjectProperty => {
                     PropertyInner::SoftObject(SoftObjectPath::read(ar)?)
                 }
-                PropertyType::ObjectProperty => PropertyInner::Object(ar.read_string()?),
+                PropertyType::ObjectProperty => PropertyInner::Object(ar.read_object_ref()?),
                 PropertyType::TextProperty => PropertyInner::Text(Text::read(ar)?),
                 PropertyType::DelegateProperty => PropertyInner::Delegate(Delegate::read(ar)?),
                 PropertyType::MulticastDelegateProperty => {
@@ -3124,7 +3130,7 @@ impl Property {
                 value.write(ar)?;
             }
             PropertyInner::Object(value) => {
-                ar.write_string(value)?;
+                ar.write_object_ref(value)?;
             }
             PropertyInner::Text(value) => {
                 value.write(ar)?;
