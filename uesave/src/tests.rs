@@ -24,9 +24,9 @@ fn mock_header() -> Header {
 
 fn run<S, R, F>(s: S, f: F) -> Result<R>
 where
-    F: FnOnce(&mut Context<S>) -> Result<R>,
+    F: FnOnce(&mut SaveGameArchive<S>) -> Result<R>,
 {
-    Context::run(s, |s| {
+    SaveGameArchive::run(s, |s| {
         s.set_version(mock_header());
         f(s)
     })

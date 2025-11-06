@@ -49,28 +49,24 @@ impl Scope {
 }
 
 #[derive(Debug)]
-pub(crate) struct Context<S> {
+pub(crate) struct SaveGameArchive<S> {
     pub(crate) stream: S,
-    pub(crate) state: ContextState,
-}
-#[derive(Debug)]
-pub(crate) struct ContextState {
     pub(crate) version: Option<Header>,
     pub(crate) types: Rc<Types>,
     pub(crate) scope: Scope,
     pub(crate) log: bool,
 }
-impl<R: Read> Read for Context<R> {
+impl<R: Read> Read for SaveGameArchive<R> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         self.stream.read(buf)
     }
 }
-impl<S: Seek> Seek for Context<S> {
+impl<S: Seek> Seek for SaveGameArchive<S> {
     fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
         self.stream.seek(pos)
     }
 }
-impl<W: Write + Seek> Write for Context<W> {
+impl<W: Write + Seek> Write for SaveGameArchive<W> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         self.stream.write(buf)
     }
@@ -79,47 +75,45 @@ impl<W: Write + Seek> Write for Context<W> {
     }
 }
 
-impl<S> Context<S> {
+impl<S> SaveGameArchive<S> {
     pub(crate) fn run<F, T>(stream: S, f: F) -> T
     where
-        F: FnOnce(&mut Context<S>) -> T,
+        F: FnOnce(&mut SaveGameArchive<S>) -> T,
     {
-        f(&mut Context {
+        f(&mut SaveGameArchive {
             stream,
-            state: ContextState {
-                version: None,
-                types: Rc::new(Types::new()),
-                scope: Scope::root(),
-                log: false,
-            },
+            version: None,
+            types: Rc::new(Types::new()),
+            scope: Scope::root(),
+            log: false,
         })
     }
     pub(crate) fn with_scope<F, T>(&mut self, name: &str, f: F) -> T
     where
         F: FnOnce(&mut Self) -> T,
     {
-        self.state.scope.push(name);
+        self.scope.push(name);
         let result = f(self);
-        self.state.scope.pop();
+        self.scope.pop();
         result
     }
     fn path(&self) -> String {
-        self.state.scope.path()
+        self.scope.path()
     }
     fn get_type(&self) -> Option<&StructType> {
-        self.state.types.types.get(&self.path())
+        self.types.types.get(&self.path())
     }
     pub(crate) fn set_version(&mut self, version: Header) {
-        self.state.version = Some(version);
+        self.version = Some(version);
     }
     pub(crate) fn version(&self) -> &Header {
-        self.state.version.as_ref().expect("version info not set")
+        self.version.as_ref().expect("version info not set")
     }
     pub(crate) fn log(&self) -> bool {
-        self.state.log
+        self.log
     }
 }
-impl<R: Read + Seek> Context<R> {
+impl<R: Read + Seek> SaveGameArchive<R> {
     pub(crate) fn get_type_or(&mut self, t: &StructType) -> Result<StructType> {
         let offset = self.stream.stream_position()?;
         Ok(self.get_type().cloned().unwrap_or_else(|| {

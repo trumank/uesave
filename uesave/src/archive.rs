@@ -1,6 +1,6 @@
 use std::io::{Read, Seek, Write};
 
-use crate::{Context, Header, Result, StructType, VersionInfo};
+use crate::{Header, Result, SaveGameArchive, StructType, VersionInfo};
 
 pub trait ArchiveReader: Read + Seek {
     fn version(&self) -> &dyn VersionInfo;
@@ -51,23 +51,23 @@ pub trait ArchiveWriter: Write + Seek {
     }
 }
 
-impl<R> ArchiveReader for Context<R>
+impl<R> ArchiveReader for SaveGameArchive<R>
 where
     R: Read + Seek,
 {
     fn version(&self) -> &dyn VersionInfo {
-        Context::version(self)
+        SaveGameArchive::version(self)
     }
 
     fn with_scope<F, T>(&mut self, name: &str, f: F) -> T
     where
         F: FnOnce(&mut Self) -> T,
     {
-        Context::with_scope(self, name, f)
+        SaveGameArchive::with_scope(self, name, f)
     }
 
     fn get_type_or(&mut self, default: &StructType) -> Result<StructType> {
-        Context::get_type_or(self, default)
+        SaveGameArchive::get_type_or(self, default)
     }
 
     fn read_string(&mut self) -> Result<String> {
@@ -83,19 +83,19 @@ where
     }
 
     fn log(&self) -> bool {
-        Context::log(self)
+        SaveGameArchive::log(self)
     }
 }
-impl<W> ArchiveWriter for Context<W>
+impl<W> ArchiveWriter for SaveGameArchive<W>
 where
     W: Write + Seek,
 {
     fn version(&self) -> &dyn VersionInfo {
-        Context::version(self)
+        SaveGameArchive::version(self)
     }
 
     fn set_version(&mut self, header: Header) {
-        Context::set_version(self, header)
+        SaveGameArchive::set_version(self, header)
     }
 
     fn write_string(&mut self, string: &str) -> Result<()> {
@@ -111,6 +111,6 @@ where
     }
 
     fn log(&self) -> bool {
-        Context::log(self)
+        SaveGameArchive::log(self)
     }
 }

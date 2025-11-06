@@ -38,7 +38,7 @@ pub use context::Types;
 pub use error::{Error, ParseError};
 
 use byteorder::{ReadBytesExt, WriteBytesExt, LE};
-use context::Context;
+use context::SaveGameArchive;
 use std::{
     borrow::Cow,
     io::{Cursor, Read, Seek, Write},
@@ -51,7 +51,7 @@ use tracing::instrument;
 
 use crate::{
     archive::{ArchiveReader, ArchiveWriter},
-    context::{ContextState, Scope},
+    context::Scope,
 };
 
 type Result<T, E = Error> = std::result::Result<T, E>;
@@ -3382,7 +3382,7 @@ impl Save {
     }
     pub fn write<W: Write>(&self, writer: &mut W) -> Result<()> {
         let mut buffer = vec![];
-        Context::run(&mut Cursor::new(&mut buffer), |writer| -> Result<()> {
+        SaveGameArchive::run(&mut Cursor::new(&mut buffer), |writer| -> Result<()> {
             writer.set_version(self.header.clone());
             self.header.write(writer)?;
             self.root.write(writer)?;
@@ -3422,14 +3422,12 @@ impl SaveReader {
         let types = self.types.unwrap_or_else(|| Rc::new(Types::new()));
 
         let stream = SeekReader::new(stream);
-        let mut reader = Context {
+        let mut reader = SaveGameArchive {
             stream,
-            state: ContextState {
-                version: None,
-                types,
-                scope: Scope::root(),
-                log: self.log,
-            },
+            version: None,
+            types,
+            scope: Scope::root(),
+            log: self.log,
         };
 
         || -> Result<Save> {
