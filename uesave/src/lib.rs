@@ -1230,6 +1230,7 @@ pub enum StructType {
     LinearColor,
     Color,
     SoftObjectPath,
+    SoftClassPath,
     GameplayTagContainer,
     UniqueNetIdRepl,
     RichCurveKey,
@@ -1253,6 +1254,7 @@ impl From<&str> for StructType {
             "LinearColor" => StructType::LinearColor,
             "Color" => StructType::Color,
             "SoftObjectPath" => StructType::SoftObjectPath,
+            "SoftClassPath" => StructType::SoftClassPath,
             "GameplayTagContainer" => StructType::GameplayTagContainer,
             "UniqueNetIdRepl" => StructType::UniqueNetIdRepl,
             "RichCurveKey" => StructType::RichCurveKey,
@@ -1278,6 +1280,7 @@ impl From<String> for StructType {
             "LinearColor" => StructType::LinearColor,
             "Color" => StructType::Color,
             "SoftObjectPath" => StructType::SoftObjectPath,
+            "SoftClassPath" => StructType::SoftClassPath,
             "GameplayTagContainer" => StructType::GameplayTagContainer,
             "RichCurveKey" => StructType::RichCurveKey,
             "UniqueNetIdRepl" => StructType::UniqueNetIdRepl,
@@ -1303,6 +1306,7 @@ impl StructType {
             "/Script/CoreUObject.LinearColor" => StructType::LinearColor,
             "/Script/CoreUObject.Color" => StructType::Color,
             "/Script/CoreUObject.SoftObjectPath" => StructType::SoftObjectPath,
+            "/Script/CoreUObject.SoftClassPath" => StructType::SoftClassPath,
             "/Script/GameplayTags.GameplayTagContainer" => StructType::GameplayTagContainer,
             "/Script/Engine.UniqueNetIdRepl" => StructType::UniqueNetIdRepl,
             "/Script/Engine.RichCurveKey" => StructType::RichCurveKey,
@@ -1327,6 +1331,7 @@ impl StructType {
             StructType::LinearColor => "/Script/CoreUObject.LinearColor",
             StructType::Color => "/Script/CoreUObject.Color",
             StructType::SoftObjectPath => "/Script/CoreUObject.SoftObjectPath",
+            StructType::SoftClassPath => "/Script/CoreUObject.SoftClassPath",
             StructType::GameplayTagContainer => "/Script/GameplayTags.GameplayTagContainer",
             StructType::UniqueNetIdRepl => "/Script/Engine.UniqueNetIdRepl",
             StructType::RichCurveKey => "/Script/Engine.RichCurveKey",
@@ -1351,6 +1356,7 @@ impl StructType {
             StructType::LinearColor => "LinearColor",
             StructType::Color => "Color",
             StructType::SoftObjectPath => "SoftObjectPath",
+            StructType::SoftClassPath => "SoftClassPath",
             StructType::GameplayTagContainer => "GameplayTagContainer",
             StructType::UniqueNetIdRepl => "UniqueNetIdRepl",
             StructType::RichCurveKey => "RichCurveKey",
@@ -2127,6 +2133,18 @@ impl SoftObjectPath {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SoftClassPath(pub SoftObjectPath);
+impl SoftClassPath {
+    #[instrument(name = "SoftClassPath_read", skip_all)]
+    fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
+        Ok(Self(SoftObjectPath::read(ar)?))
+    }
+    fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
+        self.0.write(ar)
+    }
+}
+
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub struct GameplayTag {
     pub name: String,
@@ -2593,6 +2611,7 @@ pub enum StructValue<T: ArchiveType = SaveGameArchiveType> {
     Color(Color),
     Rotator(Rotator),
     SoftObjectPath(T::SoftObjectPath),
+    SoftClassPath(T::SoftObjectPath),
     GameplayTagContainer(GameplayTagContainer),
     UniqueNetIdRepl(UniqueNetIdRepl),
     RichCurveKey(FRichCurveKey),
@@ -2711,6 +2730,7 @@ impl<T: ArchiveType> StructValue<T> {
             StructType::Color => StructValue::Color(Color::read(ar)?),
             StructType::Rotator => StructValue::Rotator(Rotator::read(ar)?),
             StructType::SoftObjectPath => StructValue::SoftObjectPath(ar.read_soft_object_path()?),
+            StructType::SoftClassPath => StructValue::SoftClassPath(ar.read_soft_object_path()?),
             StructType::GameplayTagContainer => {
                 StructValue::GameplayTagContainer(GameplayTagContainer::read(ar)?)
             }
@@ -2736,6 +2756,7 @@ impl<T: ArchiveType> StructValue<T> {
             StructValue::Color(v) => v.write(ar)?,
             StructValue::Rotator(v) => v.write(ar)?,
             StructValue::SoftObjectPath(v) => ar.write_soft_object_path(v)?,
+            StructValue::SoftClassPath(v) => ar.write_soft_object_path(v)?,
             StructValue::GameplayTagContainer(v) => v.write(ar)?,
             StructValue::UniqueNetIdRepl(v) => v.write(ar)?,
             StructValue::RichCurveKey(v) => v.write(ar)?,

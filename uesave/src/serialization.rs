@@ -182,6 +182,9 @@ impl<'de, 'a> DeserializeSeed<'de> for StructValueSeed<'a> {
             StructType::SoftObjectPath => Ok(StructValue::SoftObjectPath(
                 crate::SoftObjectPath::deserialize(deserializer)?,
             )),
+            StructType::SoftClassPath => Ok(StructValue::SoftClassPath(
+                crate::SoftObjectPath::deserialize(deserializer)?,
+            )),
             StructType::GameplayTagContainer => Ok(StructValue::GameplayTagContainer(
                 crate::GameplayTagContainer::deserialize(deserializer)?,
             )),
