@@ -3067,7 +3067,7 @@ impl<T: ArchiveType> Property<T> {
             Err(e) => {
                 // Parsing failed, seek back to start and read raw data
                 if ar.log() {
-                    eprintln!("Warning: Failed to parse property '{}': {}", tag.name, e);
+                    eprintln!("Warning: Failed to parse property '{}': {}", ar.path(), e);
                 }
                 ar.seek(std::io::SeekFrom::Start(start_position))?;
                 let mut property_data = vec![0u8; tag.size as usize];
