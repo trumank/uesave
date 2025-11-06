@@ -171,12 +171,7 @@ fn test_read_int_property() -> Result<()> {
     let mut reader = Cursor::new(bytes);
     assert_eq!(
         run(&mut reader, read_property)?,
-        Some((
-            "VersionNumber".into(),
-            Property {
-                inner: PropertyInner::Int(2),
-            }
-        ))
+        Some(("VersionNumber".into(), Property::Int(2),))
     );
     Ok(())
 }
@@ -206,30 +201,11 @@ fn test_read_struct_property() -> Result<()> {
         run(&mut reader, read_property)?,
         Some((
             "VanityMasterySave".into(),
-            Property {
-                inner: PropertyInner::Struct(StructValue::Struct(Properties(
-                    indexmap::IndexMap::from([
-                        (
-                            "Level".into(),
-                            Property {
-                                inner: PropertyInner::Int(140),
-                            }
-                        ),
-                        (
-                            "XP".into(),
-                            Property {
-                                inner: PropertyInner::Int(9018),
-                            },
-                        ),
-                        (
-                            "HasAwardedForOldPurchases".into(),
-                            Property {
-                                inner: PropertyInner::Bool(true),
-                            },
-                        ),
-                    ])
-                )),)
-            }
+            Property::Struct(StructValue::Struct(Properties(indexmap::IndexMap::from([
+                ("Level".into(), Property::Int(140)),
+                ("XP".into(), Property::Int(9018)),
+                ("HasAwardedForOldPurchases".into(), Property::Bool(true)),
+            ]))),)
         ))
     );
     Ok(())
@@ -249,9 +225,7 @@ fn test_read_array_property() -> Result<()> {
         run(&mut reader, read_property)?,
         Some((
             "StatIndices".into(),
-            Property {
-                inner: PropertyInner::Array(ValueArray::Base(ValueVec::Int(vec![0]))),
-            }
+            Property::Array(ValueArray::Base(ValueVec::Int(vec![0]))),
         ))
     );
     Ok(())

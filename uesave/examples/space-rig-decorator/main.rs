@@ -1,6 +1,6 @@
 use std::fs::File;
 
-use uesave::{PropertyInner, Save, StructValue, ValueArray};
+use uesave::{Property, Save, StructValue, ValueArray};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     const PROP_POSITION: &str = "PropPosition_7_B8CD81CD4E138D8E06FBBA8056FE4C85";
@@ -13,32 +13,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "examples/space-rig-decorator/PropPack.sav",
     )?)?;
 
-    use PropertyInner::*;
+    use Property::*;
     let props = &save.root.properties["PropList"];
-    if let Array(ValueArray::Struct(value)) = &props.inner {
+    if let Array(ValueArray::Struct(value)) = &props {
         for prop in value {
             if let StructValue::Struct(p) = prop {
-                if let Struct(StructValue::Struct(value)) = &p[PROP_POSITION].inner {
-                    if let Struct(StructValue::Quat(value)) = &value["Rotation"].inner {
+                if let Struct(StructValue::Struct(value)) = &p[PROP_POSITION] {
+                    if let Struct(StructValue::Quat(value)) = &value["Rotation"] {
                         print!("{}:{}:{}:{}:", value.x, value.y, value.z, value.w);
                     }
-                    if let Struct(StructValue::Vector(value)) = &value["Translation"].inner {
+                    if let Struct(StructValue::Vector(value)) = &value["Translation"] {
                         print!("{}:{}:{}:", value.x, value.y, value.z);
                     }
-                    if let Struct(StructValue::Vector(value)) = &value["Scale3D"].inner {
+                    if let Struct(StructValue::Vector(value)) = &value["Scale3D"] {
                         print!("{}:{}:{}:", value.x, value.y, value.z);
                     }
                 }
-                if let Str(value) = &p[PROP_NAME].inner {
+                if let Str(value) = &p[PROP_NAME] {
                     print!("{value}:");
                 }
-                if let Bool(value) = &p[IS_STATIC_MESH].inner {
+                if let Bool(value) = &p[IS_STATIC_MESH] {
                     print!("{value}:");
                 }
-                if let Object(value) = &p[DYNAMIC_PROP_CLASS].inner {
+                if let Object(value) = &p[DYNAMIC_PROP_CLASS] {
                     print!("{value}:");
                 }
-                if let Object(value) = &p[STATIC_MESH].inner {
+                if let Object(value) = &p[STATIC_MESH] {
                     println!("{value}");
                 }
             }
