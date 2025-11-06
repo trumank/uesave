@@ -185,6 +185,9 @@ impl<'de, 'a> DeserializeSeed<'de> for StructValueSeed<'a> {
             StructType::UniqueNetIdRepl => Ok(StructValue::UniqueNetIdRepl(
                 crate::UniqueNetIdRepl::deserialize(deserializer)?,
             )),
+            StructType::RichCurveKey => Ok(StructValue::RichCurveKey(
+                crate::FRichCurveKey::deserialize(deserializer)?,
+            )),
             StructType::Struct(_) => {
                 let props = PropertiesSeed {
                     path: self.path,

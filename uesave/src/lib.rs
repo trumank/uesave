@@ -1231,6 +1231,7 @@ pub enum StructType {
     SoftObjectPath,
     GameplayTagContainer,
     UniqueNetIdRepl,
+    RichCurveKey,
     Raw(String),
     Struct(Option<String>),
 }
@@ -1252,6 +1253,7 @@ impl From<&str> for StructType {
             "SoftObjectPath" => StructType::SoftObjectPath,
             "GameplayTagContainer" => StructType::GameplayTagContainer,
             "UniqueNetIdRepl" => StructType::UniqueNetIdRepl,
+            "RichCurveKey" => StructType::RichCurveKey,
             "Struct" => StructType::Struct(None),
             _ => StructType::Struct(Some(t.to_owned())),
         }
@@ -1274,6 +1276,7 @@ impl From<String> for StructType {
             "Color" => StructType::Color,
             "SoftObjectPath" => StructType::SoftObjectPath,
             "GameplayTagContainer" => StructType::GameplayTagContainer,
+            "RichCurveKey" => StructType::RichCurveKey,
             "UniqueNetIdRepl" => StructType::UniqueNetIdRepl,
             "Struct" => StructType::Struct(None),
             _ => StructType::Struct(Some(t)),
@@ -1298,6 +1301,7 @@ impl StructType {
             "/Script/CoreUObject.SoftObjectPath" => StructType::SoftObjectPath,
             "/Script/GameplayTags.GameplayTagContainer" => StructType::GameplayTagContainer,
             "/Script/Engine.UniqueNetIdRepl" => StructType::UniqueNetIdRepl,
+            "/Script/Engine.RichCurveKey" => StructType::RichCurveKey,
             "/Script/CoreUObject.Struct" => StructType::Struct(None),
             _ if raw => StructType::Raw(t.to_owned()),
             _ => StructType::Struct(Some(t.to_owned())),
@@ -1320,6 +1324,7 @@ impl StructType {
             StructType::SoftObjectPath => "/Script/CoreUObject.SoftObjectPath",
             StructType::GameplayTagContainer => "/Script/GameplayTags.GameplayTagContainer",
             StructType::UniqueNetIdRepl => "/Script/Engine.UniqueNetIdRepl",
+            StructType::RichCurveKey => "/Script/Engine.RichCurveKey",
             StructType::Raw(t) => t,
             StructType::Struct(Some(t)) => t,
             _ => unreachable!(),
@@ -1342,6 +1347,7 @@ impl StructType {
             StructType::SoftObjectPath => "SoftObjectPath",
             StructType::GameplayTagContainer => "GameplayTagContainer",
             StructType::UniqueNetIdRepl => "UniqueNetIdRepl",
+            StructType::RichCurveKey => "RichCurveKey",
             StructType::Raw(t) => t,
             StructType::Struct(Some(t)) => t,
             _ => unreachable!(),
@@ -1974,6 +1980,56 @@ impl IntPoint {
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
+pub struct FRichCurveKey {
+    /// Interpolation mode between this key and the next
+    pub interp_mode: u8,
+    /// Mode for tangents at this key
+    pub tangent_mode: u8,
+    /// If either tangent at this key is 'weighted'
+    pub tangent_weight_mode: u8,
+    /// Time at this key
+    pub time: Float,
+    /// Value at this key
+    pub value: Float,
+    /// If RCIM_Cubic, the arriving tangent at this key
+    pub arrive_tangent: Float,
+    /// If RCTWM_WeightedArrive or RCTWM_WeightedBoth, the weight of the left tangent
+    pub arrive_tangent_weight: Float,
+    /// If RCIM_Cubic, the leaving tangent at this key
+    pub leave_tangent: Float,
+    /// If RCTWM_WeightedLeave or RCTWM_WeightedBoth, the weight of the right tangent
+    pub leave_tangent_weight: Float,
+}
+impl FRichCurveKey {
+    #[instrument(name = "FRichCurveKey_read", skip_all)]
+    fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
+        Ok(Self {
+            interp_mode: ar.read_u8()?,
+            tangent_mode: ar.read_u8()?,
+            tangent_weight_mode: ar.read_u8()?,
+            time: ar.read_f32::<LE>()?.into(),
+            value: ar.read_f32::<LE>()?.into(),
+            arrive_tangent: ar.read_f32::<LE>()?.into(),
+            arrive_tangent_weight: ar.read_f32::<LE>()?.into(),
+            leave_tangent: ar.read_f32::<LE>()?.into(),
+            leave_tangent_weight: ar.read_f32::<LE>()?.into(),
+        })
+    }
+    fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
+        ar.write_u8(self.interp_mode)?;
+        ar.write_u8(self.tangent_mode)?;
+        ar.write_u8(self.tangent_weight_mode)?;
+        ar.write_f32::<LE>(self.time.into())?;
+        ar.write_f32::<LE>(self.value.into())?;
+        ar.write_f32::<LE>(self.arrive_tangent.into())?;
+        ar.write_f32::<LE>(self.arrive_tangent_weight.into())?;
+        ar.write_f32::<LE>(self.leave_tangent.into())?;
+        ar.write_f32::<LE>(self.leave_tangent_weight.into())?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SoftObjectPath {
     Old {
         asset_path_name: String,
@@ -2491,6 +2547,7 @@ pub enum StructValue<T: ArchiveType = SaveGameArchiveType> {
     SoftObjectPath(SoftObjectPath),
     GameplayTagContainer(GameplayTagContainer),
     UniqueNetIdRepl(UniqueNetIdRepl),
+    RichCurveKey(FRichCurveKey),
     /// Raw struct data for other unknown structs serialized with HasBinaryOrNativeSerialize
     Raw(Vec<u8>),
     /// User defined struct which is simply a list of properties
@@ -2609,6 +2666,7 @@ impl<T: ArchiveType> StructValue<T> {
                 StructValue::GameplayTagContainer(GameplayTagContainer::read(ar)?)
             }
             StructType::UniqueNetIdRepl => StructValue::UniqueNetIdRepl(UniqueNetIdRepl::read(ar)?),
+            StructType::RichCurveKey => StructValue::RichCurveKey(FRichCurveKey::read(ar)?),
             StructType::Raw(_) => unreachable!("should be handled at property level"),
             StructType::Struct(_) => StructValue::Struct(read_properties_until_none(ar)?),
         })
@@ -2630,6 +2688,7 @@ impl<T: ArchiveType> StructValue<T> {
             StructValue::SoftObjectPath(v) => v.write(ar)?,
             StructValue::GameplayTagContainer(v) => v.write(ar)?,
             StructValue::UniqueNetIdRepl(v) => v.write(ar)?,
+            StructValue::RichCurveKey(v) => v.write(ar)?,
             StructValue::Raw(v) => ar.write_all(v)?,
             StructValue::Struct(v) => write_properties_none_terminated(ar, v)?,
         }
