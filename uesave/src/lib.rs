@@ -2383,13 +2383,13 @@ impl Text {
         let variant = match text_history_type {
             -0x1 => Ok(TextVariant::None {
                 culture_invariant: (ar.read_u32::<LE>()? != 0) // bHasCultureInvariantString
-                    .then(|| ar.read_string())
+                    .then(|| read_string(ar))
                     .transpose()?,
             }),
             0x0 => Ok(TextVariant::Base {
-                namespace: ar.read_string_trailing()?,
-                key: ar.read_string()?,
-                source_string: ar.read_string()?,
+                namespace: read_string_trailing(ar)?,
+                key: read_string(ar)?,
+                source_string: read_string(ar)?,
             }),
             0x3 => Ok(TextVariant::ArgumentFormat {
                 format_text: std::boxed::Box::new(Text::read(ar)?),
@@ -2411,7 +2411,7 @@ impl Text {
             0xb => Ok({
                 TextVariant::StringTableEntry {
                     table: ar.read_string()?,
-                    key: ar.read_string()?,
+                    key: read_string(ar)?,
                 }
             }),
             _ => Err(Error::Other(format!(
@@ -2429,7 +2429,7 @@ impl Text {
                 ar.write_i8(-0x1)?;
                 ar.write_u32::<LE>(culture_invariant.is_some() as u32)?;
                 if let Some(culture_invariant) = culture_invariant {
-                    ar.write_string(culture_invariant)?;
+                    write_string(ar, culture_invariant)?;
                 }
             }
             TextVariant::Base {
@@ -2441,9 +2441,9 @@ impl Text {
                 // This particular string sometimes includes the trailing null byte and sometimes
                 // does not. To preserve byte-for-byte equality we save the trailing bytes (null or
                 // not) to the JSON so they can be retored later.
-                ar.write_string_trailing(&namespace.0, Some(&namespace.1))?;
-                ar.write_string(key)?;
-                ar.write_string(source_string)?;
+                write_string_trailing(ar, &namespace.0, Some(&namespace.1))?;
+                write_string(ar, key)?;
+                write_string(ar, source_string)?;
             }
             TextVariant::ArgumentFormat {
                 format_text,
@@ -2484,7 +2484,7 @@ impl Text {
             TextVariant::StringTableEntry { table, key } => {
                 ar.write_i8(0xb)?;
                 ar.write_string(table)?;
-                ar.write_string(key)?;
+                write_string(ar, key)?;
             }
         }
         Ok(())
