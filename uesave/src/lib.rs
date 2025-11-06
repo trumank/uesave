@@ -1221,6 +1221,7 @@ pub enum StructType {
     Timespan,
     Vector2D,
     Vector,
+    Vector4,
     IntVector,
     Box,
     IntPoint,
@@ -1243,6 +1244,7 @@ impl From<&str> for StructType {
             "Timespan" => StructType::Timespan,
             "Vector2D" => StructType::Vector2D,
             "Vector" => StructType::Vector,
+            "Vector4" => StructType::Vector4,
             "IntVector" => StructType::IntVector,
             "Box" => StructType::Box,
             "IntPoint" => StructType::IntPoint,
@@ -1267,6 +1269,7 @@ impl From<String> for StructType {
             "Timespan" => StructType::Timespan,
             "Vector2D" => StructType::Vector2D,
             "Vector" => StructType::Vector,
+            "Vector4" => StructType::Vector4,
             "IntVector" => StructType::IntVector,
             "Box" => StructType::Box,
             "IntPoint" => StructType::IntPoint,
@@ -1291,6 +1294,7 @@ impl StructType {
             "/Script/CoreUObject.Timespan" => StructType::Timespan,
             "/Script/CoreUObject.Vector2D" => StructType::Vector2D,
             "/Script/CoreUObject.Vector" => StructType::Vector,
+            "/Script/CoreUObject.Vector4" => StructType::Vector4,
             "/Script/CoreUObject.IntVector" => StructType::IntVector,
             "/Script/CoreUObject.Box" => StructType::Box,
             "/Script/CoreUObject.IntPoint" => StructType::IntPoint,
@@ -1314,6 +1318,7 @@ impl StructType {
             StructType::Timespan => "/Script/CoreUObject.Timespan",
             StructType::Vector2D => "/Script/CoreUObject.Vector2D",
             StructType::Vector => "/Script/CoreUObject.Vector",
+            StructType::Vector4 => "/Script/CoreUObject.Vector4",
             StructType::IntVector => "/Script/CoreUObject.IntVector",
             StructType::Box => "/Script/CoreUObject.Box",
             StructType::IntPoint => "/Script/CoreUObject.IntPoint",
@@ -1337,6 +1342,7 @@ impl StructType {
             StructType::Timespan => "Timespan",
             StructType::Vector2D => "Vector2D",
             StructType::Vector => "Vector",
+            StructType::Vector4 => "Vector4",
             StructType::IntVector => "IntVector",
             StructType::Box => "Box",
             StructType::IntPoint => "IntPoint",
@@ -1911,6 +1917,47 @@ impl Vector2D {
         } else {
             ar.write_f32::<LE>(self.x.into())?;
             ar.write_f32::<LE>(self.y.into())?;
+        }
+        Ok(())
+    }
+}
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+pub struct Vector4 {
+    pub x: Double,
+    pub y: Double,
+    pub z: Double,
+    pub w: Double,
+}
+impl Vector4 {
+    #[instrument(name = "Vector4_read", skip_all)]
+    fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
+        if ar.version().large_world_coordinates() {
+            Ok(Self {
+                x: ar.read_f64::<LE>()?.into(),
+                y: ar.read_f64::<LE>()?.into(),
+                z: ar.read_f64::<LE>()?.into(),
+                w: ar.read_f64::<LE>()?.into(),
+            })
+        } else {
+            Ok(Self {
+                x: ar.read_f32::<LE>()?.into(),
+                y: ar.read_f32::<LE>()?.into(),
+                z: ar.read_f32::<LE>()?.into(),
+                w: ar.read_f32::<LE>()?.into(),
+            })
+        }
+    }
+    fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
+        if ar.version().large_world_coordinates() {
+            ar.write_f64::<LE>(self.x.into())?;
+            ar.write_f64::<LE>(self.y.into())?;
+            ar.write_f64::<LE>(self.z.into())?;
+            ar.write_f64::<LE>(self.w.into())?;
+        } else {
+            ar.write_f32::<LE>(self.x.into())?;
+            ar.write_f32::<LE>(self.y.into())?;
+            ar.write_f32::<LE>(self.z.into())?;
+            ar.write_f32::<LE>(self.w.into())?;
         }
         Ok(())
     }
@@ -2537,6 +2584,7 @@ pub enum StructValue<T: ArchiveType = SaveGameArchiveType> {
     Timespan(Timespan),
     Vector2D(Vector2D),
     Vector(Vector),
+    Vector4(Vector4),
     IntVector(IntVector),
     Box(Box),
     IntPoint(IntPoint),
@@ -2654,6 +2702,7 @@ impl<T: ArchiveType> StructValue<T> {
             StructType::Timespan => StructValue::Timespan(ar.read_i64::<LE>()?),
             StructType::Vector2D => StructValue::Vector2D(Vector2D::read(ar)?),
             StructType::Vector => StructValue::Vector(Vector::read(ar)?),
+            StructType::Vector4 => StructValue::Vector4(Vector4::read(ar)?),
             StructType::IntVector => StructValue::IntVector(IntVector::read(ar)?),
             StructType::Box => StructValue::Box(Box::read(ar)?),
             StructType::IntPoint => StructValue::IntPoint(IntPoint::read(ar)?),
@@ -2678,6 +2727,7 @@ impl<T: ArchiveType> StructValue<T> {
             StructValue::Timespan(v) => ar.write_i64::<LE>(*v)?,
             StructValue::Vector2D(v) => v.write(ar)?,
             StructValue::Vector(v) => v.write(ar)?,
+            StructValue::Vector4(v) => v.write(ar)?,
             StructValue::IntVector(v) => v.write(ar)?,
             StructValue::Box(v) => v.write(ar)?,
             StructValue::IntPoint(v) => v.write(ar)?,

@@ -161,6 +161,9 @@ impl<'de, 'a> DeserializeSeed<'de> for StructValueSeed<'a> {
             StructType::Vector => Ok(StructValue::Vector(crate::Vector::deserialize(
                 deserializer,
             )?)),
+            StructType::Vector4 => Ok(StructValue::Vector4(crate::Vector4::deserialize(
+                deserializer,
+            )?)),
             StructType::IntVector => Ok(StructValue::IntVector(crate::IntVector::deserialize(
                 deserializer,
             )?)),
