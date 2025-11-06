@@ -1672,33 +1672,41 @@ impl FieldPath {
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
-pub struct Delegate {
-    name: String,
-    path: String,
+#[serde(bound(
+    serialize = "T::ObjectRef: Serialize",
+    deserialize = "T::ObjectRef: Deserialize<'de>"
+))]
+pub struct Delegate<T: ArchiveType = SaveGameArchiveType> {
+    pub object: T::ObjectRef,
+    pub delegate: String,
 }
-impl Delegate {
+impl<T: ArchiveType> Delegate<T> {
     #[instrument(name = "Delegate_read", skip_all)]
-    fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
+    fn read<A: ArchiveReader<ArchiveType = T>>(ar: &mut A) -> Result<Self> {
         Ok(Self {
-            name: ar.read_string()?,
-            path: ar.read_string()?,
+            object: ar.read_object_ref()?,
+            delegate: ar.read_string()?,
         })
     }
-    fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
-        ar.write_string(&self.name)?;
-        ar.write_string(&self.path)?;
+    fn write<A: ArchiveWriter<ArchiveType = T>>(&self, ar: &mut A) -> Result<()> {
+        ar.write_object_ref(&self.object)?;
+        ar.write_string(&self.delegate)?;
         Ok(())
     }
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
-pub struct MulticastDelegate(Vec<Delegate>);
-impl MulticastDelegate {
+#[serde(bound(
+    serialize = "T::ObjectRef: Serialize",
+    deserialize = "T::ObjectRef: Deserialize<'de>"
+))]
+pub struct MulticastDelegate<T: ArchiveType = SaveGameArchiveType>(pub Vec<Delegate<T>>);
+impl<T: ArchiveType> MulticastDelegate<T> {
     #[instrument(name = "MulticastDelegate_read", skip_all)]
-    fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
+    fn read<A: ArchiveReader<ArchiveType = T>>(ar: &mut A) -> Result<Self> {
         Ok(Self(read_array(ar.read_u32::<LE>()?, ar, Delegate::read)?))
     }
-    fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
+    fn write<A: ArchiveWriter<ArchiveType = T>>(&self, ar: &mut A) -> Result<()> {
         ar.write_u32::<LE>(self.0.len() as u32)?;
         for entry in &self.0 {
             entry.write(ar)?;
@@ -1708,13 +1716,17 @@ impl MulticastDelegate {
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
-pub struct MulticastInlineDelegate(Vec<Delegate>);
-impl MulticastInlineDelegate {
+#[serde(bound(
+    serialize = "T::ObjectRef: Serialize",
+    deserialize = "T::ObjectRef: Deserialize<'de>"
+))]
+pub struct MulticastInlineDelegate<T: ArchiveType = SaveGameArchiveType>(pub Vec<Delegate<T>>);
+impl<T: ArchiveType> MulticastInlineDelegate<T> {
     #[instrument(name = "MulticastInlineDelegate_read", skip_all)]
-    fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
+    fn read<A: ArchiveReader<ArchiveType = T>>(ar: &mut A) -> Result<Self> {
         Ok(Self(read_array(ar.read_u32::<LE>()?, ar, Delegate::read)?))
     }
-    fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
+    fn write<A: ArchiveWriter<ArchiveType = T>>(&self, ar: &mut A) -> Result<()> {
         ar.write_u32::<LE>(self.0.len() as u32)?;
         for entry in &self.0 {
             entry.write(ar)?;
@@ -1724,13 +1736,17 @@ impl MulticastInlineDelegate {
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
-pub struct MulticastSparseDelegate(Vec<Delegate>);
-impl MulticastSparseDelegate {
+#[serde(bound(
+    serialize = "T::ObjectRef: Serialize",
+    deserialize = "T::ObjectRef: Deserialize<'de>"
+))]
+pub struct MulticastSparseDelegate<T: ArchiveType = SaveGameArchiveType>(pub Vec<Delegate<T>>);
+impl<T: ArchiveType> MulticastSparseDelegate<T> {
     #[instrument(name = "MulticastSparseDelegate_read", skip_all)]
-    fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
+    fn read<A: ArchiveReader<ArchiveType = T>>(ar: &mut A) -> Result<Self> {
         Ok(Self(read_array(ar.read_u32::<LE>()?, ar, Delegate::read)?))
     }
-    fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
+    fn write<A: ArchiveWriter<ArchiveType = T>>(&self, ar: &mut A) -> Result<()> {
         ar.write_u32::<LE>(self.0.len() as u32)?;
         for entry in &self.0 {
             entry.write(ar)?;
@@ -3127,10 +3143,10 @@ pub enum Property<T: ArchiveType = SaveGameArchiveType> {
     Name(String),
     Object(T::ObjectRef),
     Text(Text),
-    Delegate(Delegate),
-    MulticastDelegate(MulticastDelegate),
-    MulticastInlineDelegate(MulticastInlineDelegate),
-    MulticastSparseDelegate(MulticastSparseDelegate),
+    Delegate(Delegate<T>),
+    MulticastDelegate(MulticastDelegate<T>),
+    MulticastInlineDelegate(MulticastInlineDelegate<T>),
+    MulticastSparseDelegate(MulticastSparseDelegate<T>),
     Set(ValueVec<T>),
     Map(Vec<MapEntry<T>>),
     Struct(StructValue<T>),
