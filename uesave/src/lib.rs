@@ -2709,7 +2709,7 @@ impl<T: ArchiveType> PropertyValue<T> {
                 PropertyType::FloatProperty => PropertyValue::Float(ar.read_f32::<LE>()?.into()),
                 PropertyType::DoubleProperty => PropertyValue::Double(ar.read_f64::<LE>()?.into()),
                 PropertyType::NameProperty => PropertyValue::Name(ar.read_string()?),
-                PropertyType::StrProperty => PropertyValue::Str(ar.read_string()?),
+                PropertyType::StrProperty => PropertyValue::Str(read_string(ar)?),
                 PropertyType::SoftObjectProperty => {
                     PropertyValue::SoftObject(ar.read_soft_object_path()?)
                 }
@@ -2730,7 +2730,7 @@ impl<T: ArchiveType> PropertyValue<T> {
             PropertyValue::Double(v) => ar.write_f64::<LE>((*v).into())?,
             PropertyValue::Bool(v) => ar.write_u8(u8::from(*v))?,
             PropertyValue::Name(v) => ar.write_string(v)?,
-            PropertyValue::Str(v) => ar.write_string(v)?,
+            PropertyValue::Str(v) => write_string(ar, v)?,
             PropertyValue::SoftObject(v) => ar.write_soft_object_path(v)?,
             PropertyValue::SoftObjectPath(v) => ar.write_soft_object_path(v)?,
             PropertyValue::Object(v) => ar.write_object_ref(v)?,
@@ -2852,7 +2852,7 @@ impl<T: ArchiveType> ValueVec<T> {
             PropertyType::EnumProperty => {
                 ValueVec::Enum(read_array(count, ar, |r| r.read_string())?)
             }
-            PropertyType::StrProperty => ValueVec::Str(read_array(count, ar, |r| r.read_string())?),
+            PropertyType::StrProperty => ValueVec::Str(read_array(count, ar, |r| read_string(r))?),
             PropertyType::TextProperty => ValueVec::Text(read_array(count, ar, Text::read)?),
             PropertyType::SoftObjectProperty => {
                 ValueVec::SoftObject(read_array(count, ar, |r| r.read_soft_object_path())?)
@@ -2954,7 +2954,13 @@ impl<T: ArchiveType> ValueVec<T> {
                     ar.write_string(i)?;
                 }
             }
-            ValueVec::Str(v) | ValueVec::Name(v) => {
+            ValueVec::Str(v) => {
+                ar.write_u32::<LE>(v.len() as u32)?;
+                for i in v {
+                    write_string(ar, i)?;
+                }
+            }
+            ValueVec::Name(v) => {
                 ar.write_u32::<LE>(v.len() as u32)?;
                 for i in v {
                     ar.write_string(i)?;
@@ -3250,7 +3256,7 @@ impl<T: ArchiveType> Property<T> {
                     PropertyType::FloatProperty => Property::Float(ar.read_f32::<LE>()?.into()),
                     PropertyType::DoubleProperty => Property::Double(ar.read_f64::<LE>()?.into()),
                     PropertyType::NameProperty => Property::Name(ar.read_string()?),
-                    PropertyType::StrProperty => Property::Str(ar.read_string()?),
+                    PropertyType::StrProperty => Property::Str(read_string(ar)?),
                     PropertyType::FieldPathProperty => Property::FieldPath(FieldPath::read(ar)?),
                     PropertyType::SoftObjectProperty => {
                         Property::SoftObject(ar.read_soft_object_path()?)
