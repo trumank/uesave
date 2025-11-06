@@ -400,12 +400,31 @@ fn write_properties_none_terminated<A: ArchiveWriter>(
 
 #[instrument(skip_all)]
 fn read_property<A: ArchiveReader>(ar: &mut A) -> Result<Option<(PropertyKey, Property)>> {
-    if let Some(tag) = PropertyTagFull::read(ar)? {
-        let value = ar.with_scope(&tag.name, |ar| {
-            ar.record_schema(ar.path().to_string(), tag.clone().into_partial());
-            Property::read(ar, tag.clone())
+    if let Some(mut tag) = PropertyTagFull::read(ar)? {
+        let tag_name = tag.name.to_string();
+        let (value, updated_tag_data) = ar.with_scope(
+            &tag_name,
+            |ar| -> Result<(Property, Option<PropertyTagDataFull>)> {
+                // Read the property - it may discover additional type information (e.g., struct types in arrays)
+                Property::read(ar, tag.clone())
+            },
+        )?;
+
+        // If type information was refined during reading (e.g., array of structs in older UE versions),
+        // update the tag data and record the complete schema
+        if let Some(new_data) = updated_tag_data {
+            tag.data = new_data;
+        }
+
+        let key = PropertyKey(tag.index, tag_name.clone());
+
+        // Record the final, complete schema
+        ar.with_scope(&tag_name, |ar| -> Result<()> {
+            ar.record_schema(ar.path().to_string(), tag.into_partial());
+            Ok(())
         })?;
-        Ok(Some((PropertyKey(tag.index, tag.name.to_string()), value)))
+
+        Ok(Some((key, value)))
     } else {
         Ok(None)
     }
@@ -2493,12 +2512,8 @@ pub enum ValueVec {
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub enum ValueArray {
     Base(ValueVec),
-    Struct {
-        type_: PropertyType,
-        struct_type: StructType,
-        id: Option<FGuid>,
-        value: Vec<StructValue>,
-    },
+    /// Array of structs - type information is stored in the property tag schema
+    Struct(Vec<StructValue>),
 }
 /// Encapsulates [`ValueVec`] with a special handling of structs. See also: [`ValueArray`]
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
@@ -2805,66 +2820,79 @@ impl ValueArray {
         ar: &mut A,
         tag: PropertyTagDataFull,
         size: u32,
-    ) -> Result<ValueArray> {
+    ) -> Result<(ValueArray, Option<PropertyTagDataFull>)> {
         let count = ar.read_u32::<LE>()?;
         Ok(match tag {
-            PropertyTagDataFull::Struct { struct_type, id } => {
-                let (struct_type, id) = if !ar.version().property_tag() {
+            PropertyTagDataFull::Struct { struct_type, id: _ } => {
+                let (struct_type, updated) = if !ar.version().property_tag() {
+                    // outer tag shows Struct but struct_type is unknown
                     if ar.version().array_inner_tag() {
-                        let tag = PropertyTagFull::read(ar)?.unwrap();
-                        match tag.data {
-                            PropertyTagDataFull::Struct { struct_type, id } => (struct_type, id),
+                        // this is where the actual inner struct type is determined
+                        let inner_tag = PropertyTagFull::read(ar)?.unwrap();
+                        match inner_tag.data {
+                            PropertyTagDataFull::Struct { struct_type, id } => {
+                                // Return the discovered type information to update the outer tag
+                                (
+                                    struct_type.clone(),
+                                    Some(PropertyTagDataFull::Struct { struct_type, id }),
+                                )
+                            }
                             _ => {
                                 return Err(Error::Other(format!(
-                                    "expected StructProperty tag, found {tag:?}"
+                                    "expected StructProperty tag, found {inner_tag:?}"
                                 )))
                             }
                         }
                     } else {
                         // TODO prior to 4.12 struct type is unknown so should be able to
                         // manually specify like Sets/Maps
-                        (StructType::Struct(None), Default::default())
+                        (StructType::Struct(None), None)
                     }
                 } else {
-                    (struct_type, id)
+                    (struct_type, None)
                 };
 
                 let mut value = vec![];
                 for _ in 0..count {
                     value.push(StructValue::read(ar, &struct_type)?);
                 }
-                ValueArray::Struct {
-                    type_: PropertyType::StructProperty,
-                    struct_type,
-                    id: Some(id),
-                    value,
-                }
+                (ValueArray::Struct(value), updated)
             }
-            _ => ValueArray::Base(ValueVec::read(ar, &tag.basic_type(), size, count)?),
+            _ => (
+                ValueArray::Base(ValueVec::read(ar, &tag.basic_type(), size, count)?),
+                None,
+            ),
         })
     }
     fn write<A: ArchiveWriter>(&self, ar: &mut A, tag: &PropertyTagFull) -> Result<()> {
         match &self {
-            ValueArray::Struct {
-                type_,
-                struct_type,
-                id,
-                value,
-            } => {
+            ValueArray::Struct(value) => {
                 ar.write_u32::<LE>(value.len() as u32)?;
 
                 if !ar.version().property_tag() && ar.version().array_inner_tag() {
+                    // Extract struct type info from tag for older UE versions
+                    let (struct_type, id) = match &tag.data {
+                        PropertyTagDataFull::Array(inner) => match &**inner {
+                            PropertyTagDataFull::Struct { struct_type, id } => (struct_type, id),
+                            _ => {
+                                return Err(Error::Other(
+                                    "Array tag must contain Struct type".into(),
+                                ))
+                            }
+                        },
+                        _ => return Err(Error::Other("Expected Array tag".into())),
+                    };
+
+                    // Write inner property tag for older format
                     ar.write_string(&tag.name)?;
-                    type_.write(ar)?;
+                    PropertyType::StructProperty.write(ar)?;
 
                     // Write placeholder size
                     let size_pos = ar.stream_position()?;
                     ar.write_u32::<LE>(0)?;
                     ar.write_u32::<LE>(0)?;
                     struct_type.write(ar)?;
-                    if let Some(id) = id {
-                        id.write(ar)?;
-                    }
+                    id.write(ar)?;
                     ar.write_u8(0)?;
 
                     // Write data and measure size
@@ -2965,20 +2993,26 @@ pub enum PropertyInner {
 
 impl Property {
     #[instrument(name = "Property_read", skip_all)]
-    fn read<A: ArchiveReader>(ar: &mut A, tag: PropertyTagFull) -> Result<Property> {
+    fn read<A: ArchiveReader>(
+        ar: &mut A,
+        tag: PropertyTagFull,
+    ) -> Result<(Property, Option<PropertyTagDataFull>)> {
         if tag.data.has_raw_struct() {
             let mut raw = vec![0; tag.size as usize];
             ar.read_exact(&mut raw)?;
-            return Ok(Property {
-                inner: PropertyInner::Raw(raw),
-            });
+            return Ok((
+                Property {
+                    inner: PropertyInner::Raw(raw),
+                },
+                None,
+            ));
         }
         // Save the current position before attempting to parse
         let start_position = ar.stream_position()?;
 
         // Try to parse the property directly from the stream
-        let inner = match Self::try_read_inner(ar, &tag) {
-            Ok(inner) => inner,
+        let (inner, updated_tag_data) = match Self::try_read_inner(ar, &tag) {
+            Ok(result) => result,
             Err(e) => {
                 // Parsing failed, seek back to start and read raw data
                 if ar.log() {
@@ -2987,31 +3021,34 @@ impl Property {
                 ar.seek(std::io::SeekFrom::Start(start_position))?;
                 let mut property_data = vec![0u8; tag.size as usize];
                 ar.read_exact(&mut property_data)?;
-                PropertyInner::Raw(property_data)
+                (PropertyInner::Raw(property_data), None)
             }
         };
 
-        Ok(Property { inner })
+        Ok((Property { inner }, updated_tag_data))
     }
 
     fn try_read_inner<A: ArchiveReader>(
         ar: &mut A,
         tag: &PropertyTagFull,
-    ) -> Result<PropertyInner> {
-        Ok(match &tag.data {
-            PropertyTagDataFull::Bool(value) => PropertyInner::Bool(*value),
+    ) -> Result<(PropertyInner, Option<PropertyTagDataFull>)> {
+        let (inner, updated_tag_data) = match &tag.data {
+            PropertyTagDataFull::Bool(value) => (PropertyInner::Bool(*value), None),
             PropertyTagDataFull::Byte(ref enum_type) => {
                 let value = if enum_type.is_none() {
                     Byte::Byte(ar.read_u8()?)
                 } else {
                     Byte::Label(ar.read_string()?)
                 };
-                PropertyInner::Byte(value)
+                (PropertyInner::Byte(value), None)
             }
-            PropertyTagDataFull::Enum { .. } => PropertyInner::Enum(ar.read_string()?),
+            PropertyTagDataFull::Enum { .. } => (PropertyInner::Enum(ar.read_string()?), None),
             PropertyTagDataFull::Set { key_type } => {
                 ar.read_u32::<LE>()?;
-                PropertyInner::Set(ValueSet::read(ar, key_type, tag.size - 8)?)
+                (
+                    PropertyInner::Set(ValueSet::read(ar, key_type, tag.size - 8)?),
+                    None,
+                )
             }
             PropertyTagDataFull::Map {
                 key_type,
@@ -3025,52 +3062,69 @@ impl Property {
                     value.push(MapEntry::read(ar, key_type, value_type)?)
                 }
 
-                PropertyInner::Map(value)
+                (PropertyInner::Map(value), None)
             }
-            PropertyTagDataFull::Struct { struct_type, .. } => {
-                PropertyInner::Struct(StructValue::read(ar, struct_type)?)
-            }
+            PropertyTagDataFull::Struct { struct_type, .. } => (
+                PropertyInner::Struct(StructValue::read(ar, struct_type)?),
+                None,
+            ),
             PropertyTagDataFull::Array(data) => {
-                PropertyInner::Array(ValueArray::read(ar, *data.clone(), tag.size - 4)?)
+                let (array, updated_data) = ValueArray::read(ar, *data.clone(), tag.size - 4)?;
+                (PropertyInner::Array(array), updated_data)
             }
-            PropertyTagDataFull::Other(t) => match t {
-                PropertyType::BoolProperty
-                | PropertyType::ByteProperty
-                | PropertyType::EnumProperty
-                | PropertyType::SetProperty
-                | PropertyType::MapProperty
-                | PropertyType::StructProperty
-                | PropertyType::ArrayProperty => unreachable!(),
-                PropertyType::Int8Property => PropertyInner::Int8(ar.read_i8()?),
-                PropertyType::Int16Property => PropertyInner::Int16(ar.read_i16::<LE>()?),
-                PropertyType::IntProperty => PropertyInner::Int(ar.read_i32::<LE>()?),
-                PropertyType::Int64Property => PropertyInner::Int64(ar.read_i64::<LE>()?),
-                PropertyType::UInt8Property => PropertyInner::UInt8(ar.read_u8()?),
-                PropertyType::UInt16Property => PropertyInner::UInt16(ar.read_u16::<LE>()?),
-                PropertyType::UInt32Property => PropertyInner::UInt32(ar.read_u32::<LE>()?),
-                PropertyType::UInt64Property => PropertyInner::UInt64(ar.read_u64::<LE>()?),
-                PropertyType::FloatProperty => PropertyInner::Float(ar.read_f32::<LE>()?.into()),
-                PropertyType::DoubleProperty => PropertyInner::Double(ar.read_f64::<LE>()?.into()),
-                PropertyType::NameProperty => PropertyInner::Name(ar.read_string()?),
-                PropertyType::StrProperty => PropertyInner::Str(ar.read_string()?),
-                PropertyType::FieldPathProperty => PropertyInner::FieldPath(FieldPath::read(ar)?),
-                PropertyType::SoftObjectProperty => {
-                    PropertyInner::SoftObject(SoftObjectPath::read(ar)?)
-                }
-                PropertyType::ObjectProperty => PropertyInner::Object(ar.read_object_ref()?),
-                PropertyType::TextProperty => PropertyInner::Text(Text::read(ar)?),
-                PropertyType::DelegateProperty => PropertyInner::Delegate(Delegate::read(ar)?),
-                PropertyType::MulticastDelegateProperty => {
-                    PropertyInner::MulticastDelegate(MulticastDelegate::read(ar)?)
-                }
-                PropertyType::MulticastInlineDelegateProperty => {
-                    PropertyInner::MulticastInlineDelegate(MulticastInlineDelegate::read(ar)?)
-                }
-                PropertyType::MulticastSparseDelegateProperty => {
-                    PropertyInner::MulticastSparseDelegate(MulticastSparseDelegate::read(ar)?)
-                }
-            },
-        })
+            PropertyTagDataFull::Other(t) => (
+                match t {
+                    PropertyType::BoolProperty
+                    | PropertyType::ByteProperty
+                    | PropertyType::EnumProperty
+                    | PropertyType::SetProperty
+                    | PropertyType::MapProperty
+                    | PropertyType::StructProperty
+                    | PropertyType::ArrayProperty => unreachable!(),
+                    PropertyType::Int8Property => PropertyInner::Int8(ar.read_i8()?),
+                    PropertyType::Int16Property => PropertyInner::Int16(ar.read_i16::<LE>()?),
+                    PropertyType::IntProperty => PropertyInner::Int(ar.read_i32::<LE>()?),
+                    PropertyType::Int64Property => PropertyInner::Int64(ar.read_i64::<LE>()?),
+                    PropertyType::UInt8Property => PropertyInner::UInt8(ar.read_u8()?),
+                    PropertyType::UInt16Property => PropertyInner::UInt16(ar.read_u16::<LE>()?),
+                    PropertyType::UInt32Property => PropertyInner::UInt32(ar.read_u32::<LE>()?),
+                    PropertyType::UInt64Property => PropertyInner::UInt64(ar.read_u64::<LE>()?),
+                    PropertyType::FloatProperty => {
+                        PropertyInner::Float(ar.read_f32::<LE>()?.into())
+                    }
+                    PropertyType::DoubleProperty => {
+                        PropertyInner::Double(ar.read_f64::<LE>()?.into())
+                    }
+                    PropertyType::NameProperty => PropertyInner::Name(ar.read_string()?),
+                    PropertyType::StrProperty => PropertyInner::Str(ar.read_string()?),
+                    PropertyType::FieldPathProperty => {
+                        PropertyInner::FieldPath(FieldPath::read(ar)?)
+                    }
+                    PropertyType::SoftObjectProperty => {
+                        PropertyInner::SoftObject(SoftObjectPath::read(ar)?)
+                    }
+                    PropertyType::ObjectProperty => PropertyInner::Object(ar.read_object_ref()?),
+                    PropertyType::TextProperty => PropertyInner::Text(Text::read(ar)?),
+                    PropertyType::DelegateProperty => PropertyInner::Delegate(Delegate::read(ar)?),
+                    PropertyType::MulticastDelegateProperty => {
+                        PropertyInner::MulticastDelegate(MulticastDelegate::read(ar)?)
+                    }
+                    PropertyType::MulticastInlineDelegateProperty => {
+                        PropertyInner::MulticastInlineDelegate(MulticastInlineDelegate::read(ar)?)
+                    }
+                    PropertyType::MulticastSparseDelegateProperty => {
+                        PropertyInner::MulticastSparseDelegate(MulticastSparseDelegate::read(ar)?)
+                    }
+                },
+                None,
+            ),
+        };
+
+        // If we got updated tag data (e.g., from array of structs), wrap it in an Array tag
+        let updated_tag =
+            updated_tag_data.map(|data| PropertyTagDataFull::Array(std::boxed::Box::new(data)));
+
+        Ok((inner, updated_tag))
     }
     fn write<A: ArchiveWriter>(&self, ar: &mut A, tag: &PropertyTagFull) -> Result<()> {
         match &self.inner {

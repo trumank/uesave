@@ -15,7 +15,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     use PropertyInner::*;
     let props = &save.root.properties["PropList"];
-    if let Array(ValueArray::Struct { value, .. }) = &props.inner {
+    if let Array(ValueArray::Struct(value)) = &props.inner {
         for prop in value {
             if let StructValue::Struct(p) = prop {
                 if let Struct(StructValue::Struct(value)) = &p[PROP_POSITION].inner {
