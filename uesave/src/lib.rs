@@ -1110,8 +1110,41 @@ impl PropertyTagFull<'_> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum PropertyType {
+macro_rules! define_property_types {
+    ($($variant:ident),* $(,)?) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+        pub enum PropertyType {
+            $($variant,)*
+        }
+
+        impl PropertyType {
+            fn get_name(&self) -> &str {
+                match self {
+                    $(PropertyType::$variant => stringify!($variant),)*
+                }
+            }
+
+            #[instrument(name = "PropertyType_read", skip_all)]
+            fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
+                Self::try_from(&ar.read_string()?)
+            }
+
+            fn try_from(name: &str) -> Result<Self> {
+                match name {
+                    $(stringify!($variant) => Ok(PropertyType::$variant),)*
+                    _ => Err(Error::UnknownPropertyType(format!("{name:?}"))),
+                }
+            }
+
+            fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
+                ar.write_string(self.get_name())?;
+                Ok(())
+            }
+        }
+    };
+}
+
+define_property_types! {
     IntProperty,
     Int8Property,
     Int16Property,
@@ -1140,254 +1173,102 @@ pub enum PropertyType {
     MapProperty,
     StructProperty,
 }
-impl PropertyType {
-    fn get_name(&self) -> &str {
-        match &self {
-            PropertyType::Int8Property => "Int8Property",
-            PropertyType::Int16Property => "Int16Property",
-            PropertyType::IntProperty => "IntProperty",
-            PropertyType::Int64Property => "Int64Property",
-            PropertyType::UInt8Property => "UInt8Property",
-            PropertyType::UInt16Property => "UInt16Property",
-            PropertyType::UInt32Property => "UInt32Property",
-            PropertyType::UInt64Property => "UInt64Property",
-            PropertyType::FloatProperty => "FloatProperty",
-            PropertyType::DoubleProperty => "DoubleProperty",
-            PropertyType::BoolProperty => "BoolProperty",
-            PropertyType::ByteProperty => "ByteProperty",
-            PropertyType::EnumProperty => "EnumProperty",
-            PropertyType::ArrayProperty => "ArrayProperty",
-            PropertyType::ObjectProperty => "ObjectProperty",
-            PropertyType::StrProperty => "StrProperty",
-            PropertyType::FieldPathProperty => "FieldPathProperty",
-            PropertyType::SoftObjectProperty => "SoftObjectProperty",
-            PropertyType::NameProperty => "NameProperty",
-            PropertyType::TextProperty => "TextProperty",
-            PropertyType::DelegateProperty => "DelegateProperty",
-            PropertyType::MulticastDelegateProperty => "MulticastDelegateProperty",
-            PropertyType::MulticastInlineDelegateProperty => "MulticastInlineDelegateProperty",
-            PropertyType::MulticastSparseDelegateProperty => "MulticastSparseDelegateProperty",
-            PropertyType::SetProperty => "SetProperty",
-            PropertyType::MapProperty => "MapProperty",
-            PropertyType::StructProperty => "StructProperty",
+
+macro_rules! define_struct_types {
+    ($(($package:literal, $variant:ident)),* $(,)?) => {
+        #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+        pub enum StructType {
+            $($variant,)*
+            Raw(String),
+            Struct(Option<String>),
         }
-    }
-    #[instrument(name = "PropertyType_read", skip_all)]
-    fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
-        Self::try_from(&ar.read_string()?)
-    }
-    fn try_from(name: &str) -> Result<Self> {
-        match name {
-            "Int8Property" => Ok(PropertyType::Int8Property),
-            "Int16Property" => Ok(PropertyType::Int16Property),
-            "IntProperty" => Ok(PropertyType::IntProperty),
-            "Int64Property" => Ok(PropertyType::Int64Property),
-            "UInt8Property" => Ok(PropertyType::UInt8Property),
-            "UInt16Property" => Ok(PropertyType::UInt16Property),
-            "UInt32Property" => Ok(PropertyType::UInt32Property),
-            "UInt64Property" => Ok(PropertyType::UInt64Property),
-            "FloatProperty" => Ok(PropertyType::FloatProperty),
-            "DoubleProperty" => Ok(PropertyType::DoubleProperty),
-            "BoolProperty" => Ok(PropertyType::BoolProperty),
-            "ByteProperty" => Ok(PropertyType::ByteProperty),
-            "EnumProperty" => Ok(PropertyType::EnumProperty),
-            "ArrayProperty" => Ok(PropertyType::ArrayProperty),
-            "ObjectProperty" => Ok(PropertyType::ObjectProperty),
-            "StrProperty" => Ok(PropertyType::StrProperty),
-            "FieldPathProperty" => Ok(PropertyType::FieldPathProperty),
-            "SoftObjectProperty" => Ok(PropertyType::SoftObjectProperty),
-            "NameProperty" => Ok(PropertyType::NameProperty),
-            "TextProperty" => Ok(PropertyType::TextProperty),
-            "DelegateProperty" => Ok(PropertyType::DelegateProperty),
-            "MulticastDelegateProperty" => Ok(PropertyType::MulticastDelegateProperty),
-            "MulticastInlineDelegateProperty" => Ok(PropertyType::MulticastInlineDelegateProperty),
-            "MulticastSparseDelegateProperty" => Ok(PropertyType::MulticastSparseDelegateProperty),
-            "SetProperty" => Ok(PropertyType::SetProperty),
-            "MapProperty" => Ok(PropertyType::MapProperty),
-            "StructProperty" => Ok(PropertyType::StructProperty),
-            _ => Err(Error::UnknownPropertyType(format!("{name:?}"))),
+
+        impl From<&str> for StructType {
+            fn from(t: &str) -> Self {
+                match t {
+                    $(stringify!($variant) => StructType::$variant,)*
+                    "Struct" => StructType::Struct(None),
+                    _ => StructType::Struct(Some(t.to_owned())),
+                }
+            }
         }
-    }
-    fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
-        ar.write_string(self.get_name())?;
-        Ok(())
-    }
+
+        impl From<String> for StructType {
+            fn from(t: String) -> Self {
+                match t.as_str() {
+                    $(stringify!($variant) => StructType::$variant,)*
+                    "Struct" => StructType::Struct(None),
+                    _ => StructType::Struct(Some(t)),
+                }
+            }
+        }
+
+        impl StructType {
+            fn from_full(t: &str, raw: bool) -> Self {
+                match t {
+                    $(concat!($package, ".", stringify!($variant)) => StructType::$variant,)*
+                    "/Script/CoreUObject.Struct" => StructType::Struct(None),
+                    _ if raw => StructType::Raw(t.to_owned()),
+                    _ => StructType::Struct(Some(t.to_owned())),
+                }
+            }
+
+            fn full_str(&self) -> &str {
+                match self {
+                    $(StructType::$variant => concat!($package, ".", stringify!($variant)),)*
+                    StructType::Raw(t) => t,
+                    StructType::Struct(Some(t)) => t,
+                    _ => unreachable!(),
+                }
+            }
+
+            fn as_str(&self) -> &str {
+                match self {
+                    $(StructType::$variant => stringify!($variant),)*
+                    StructType::Raw(t) => t,
+                    StructType::Struct(Some(t)) => t,
+                    _ => unreachable!(),
+                }
+            }
+
+            #[instrument(name = "StructType_read", skip_all)]
+            fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
+                Ok(ar.read_string()?.into())
+            }
+
+            fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
+                ar.write_string(self.as_str())?;
+                Ok(())
+            }
+
+            fn raw(&self) -> bool {
+                matches!(self, StructType::Raw(_))
+            }
+        }
+    };
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum StructType {
-    Guid,
-    DateTime,
-    Timespan,
-    Vector2D,
-    Vector,
-    Vector4,
-    IntVector,
-    Box,
-    Box2D,
-    IntPoint,
-    Quat,
-    Rotator,
-    LinearColor,
-    Color,
-    SoftObjectPath,
-    SoftClassPath,
-    GameplayTagContainer,
-    UniqueNetIdRepl,
-    KeyHandleMap,
-    RichCurveKey,
-    Raw(String),
-    Struct(Option<String>),
-}
-impl From<&str> for StructType {
-    fn from(t: &str) -> Self {
-        match t {
-            "Guid" => StructType::Guid,
-            "DateTime" => StructType::DateTime,
-            "Timespan" => StructType::Timespan,
-            "Vector2D" => StructType::Vector2D,
-            "Vector" => StructType::Vector,
-            "Vector4" => StructType::Vector4,
-            "IntVector" => StructType::IntVector,
-            "Box" => StructType::Box,
-            "Box2D" => StructType::Box2D,
-            "IntPoint" => StructType::IntPoint,
-            "Quat" => StructType::Quat,
-            "Rotator" => StructType::Rotator,
-            "LinearColor" => StructType::LinearColor,
-            "Color" => StructType::Color,
-            "SoftObjectPath" => StructType::SoftObjectPath,
-            "SoftClassPath" => StructType::SoftClassPath,
-            "GameplayTagContainer" => StructType::GameplayTagContainer,
-            "UniqueNetIdRepl" => StructType::UniqueNetIdRepl,
-            "KeyHandleMap" => StructType::KeyHandleMap,
-            "RichCurveKey" => StructType::RichCurveKey,
-            "Struct" => StructType::Struct(None),
-            _ => StructType::Struct(Some(t.to_owned())),
-        }
-    }
-}
-impl From<String> for StructType {
-    fn from(t: String) -> Self {
-        match t.as_str() {
-            "Guid" => StructType::Guid,
-            "DateTime" => StructType::DateTime,
-            "Timespan" => StructType::Timespan,
-            "Vector2D" => StructType::Vector2D,
-            "Vector" => StructType::Vector,
-            "Vector4" => StructType::Vector4,
-            "IntVector" => StructType::IntVector,
-            "Box" => StructType::Box,
-            "Box2D" => StructType::Box2D,
-            "IntPoint" => StructType::IntPoint,
-            "Quat" => StructType::Quat,
-            "Rotator" => StructType::Rotator,
-            "LinearColor" => StructType::LinearColor,
-            "Color" => StructType::Color,
-            "SoftObjectPath" => StructType::SoftObjectPath,
-            "SoftClassPath" => StructType::SoftClassPath,
-            "GameplayTagContainer" => StructType::GameplayTagContainer,
-            "KeyHandleMap" => StructType::KeyHandleMap,
-            "RichCurveKey" => StructType::RichCurveKey,
-            "UniqueNetIdRepl" => StructType::UniqueNetIdRepl,
-            "Struct" => StructType::Struct(None),
-            _ => StructType::Struct(Some(t)),
-        }
-    }
-}
-impl StructType {
-    fn from_full(t: &str, raw: bool) -> Self {
-        match t {
-            "/Script/CoreUObject.Guid" => StructType::Guid,
-            "/Script/CoreUObject.DateTime" => StructType::DateTime,
-            "/Script/CoreUObject.Timespan" => StructType::Timespan,
-            "/Script/CoreUObject.Vector2D" => StructType::Vector2D,
-            "/Script/CoreUObject.Vector" => StructType::Vector,
-            "/Script/CoreUObject.Vector4" => StructType::Vector4,
-            "/Script/CoreUObject.IntVector" => StructType::IntVector,
-            "/Script/CoreUObject.Box" => StructType::Box,
-            "/Script/CoreUObject.Box2D" => StructType::Box2D,
-            "/Script/CoreUObject.IntPoint" => StructType::IntPoint,
-            "/Script/CoreUObject.Quat" => StructType::Quat,
-            "/Script/CoreUObject.Rotator" => StructType::Rotator,
-            "/Script/CoreUObject.LinearColor" => StructType::LinearColor,
-            "/Script/CoreUObject.Color" => StructType::Color,
-            "/Script/CoreUObject.SoftObjectPath" => StructType::SoftObjectPath,
-            "/Script/CoreUObject.SoftClassPath" => StructType::SoftClassPath,
-            "/Script/GameplayTags.GameplayTagContainer" => StructType::GameplayTagContainer,
-            "/Script/Engine.UniqueNetIdRepl" => StructType::UniqueNetIdRepl,
-            "/Script/Engine.KeyHandleMap" => StructType::KeyHandleMap,
-            "/Script/Engine.RichCurveKey" => StructType::RichCurveKey,
-            "/Script/CoreUObject.Struct" => StructType::Struct(None),
-            _ if raw => StructType::Raw(t.to_owned()),
-            _ => StructType::Struct(Some(t.to_owned())),
-        }
-    }
-    fn full_str(&self) -> &str {
-        match self {
-            StructType::Guid => "/Script/CoreUObject.Guid",
-            StructType::DateTime => "/Script/CoreUObject.DateTime",
-            StructType::Timespan => "/Script/CoreUObject.Timespan",
-            StructType::Vector2D => "/Script/CoreUObject.Vector2D",
-            StructType::Vector => "/Script/CoreUObject.Vector",
-            StructType::Vector4 => "/Script/CoreUObject.Vector4",
-            StructType::IntVector => "/Script/CoreUObject.IntVector",
-            StructType::Box => "/Script/CoreUObject.Box",
-            StructType::Box2D => "/Script/CoreUObject.Box2D",
-            StructType::IntPoint => "/Script/CoreUObject.IntPoint",
-            StructType::Quat => "/Script/CoreUObject.Quat",
-            StructType::Rotator => "/Script/CoreUObject.Rotator",
-            StructType::LinearColor => "/Script/CoreUObject.LinearColor",
-            StructType::Color => "/Script/CoreUObject.Color",
-            StructType::SoftObjectPath => "/Script/CoreUObject.SoftObjectPath",
-            StructType::SoftClassPath => "/Script/CoreUObject.SoftClassPath",
-            StructType::GameplayTagContainer => "/Script/GameplayTags.GameplayTagContainer",
-            StructType::UniqueNetIdRepl => "/Script/Engine.UniqueNetIdRepl",
-            StructType::KeyHandleMap => "/Script/Engine.KeyHandleMap",
-            StructType::RichCurveKey => "/Script/Engine.RichCurveKey",
-            StructType::Raw(t) => t,
-            StructType::Struct(Some(t)) => t,
-            _ => unreachable!(),
-        }
-    }
-    fn as_str(&self) -> &str {
-        match self {
-            StructType::Guid => "Guid",
-            StructType::DateTime => "DateTime",
-            StructType::Timespan => "Timespan",
-            StructType::Vector2D => "Vector2D",
-            StructType::Vector => "Vector",
-            StructType::Vector4 => "Vector4",
-            StructType::IntVector => "IntVector",
-            StructType::Box => "Box",
-            StructType::Box2D => "Box2D",
-            StructType::IntPoint => "IntPoint",
-            StructType::Quat => "Quat",
-            StructType::Rotator => "Rotator",
-            StructType::LinearColor => "LinearColor",
-            StructType::Color => "Color",
-            StructType::SoftObjectPath => "SoftObjectPath",
-            StructType::SoftClassPath => "SoftClassPath",
-            StructType::GameplayTagContainer => "GameplayTagContainer",
-            StructType::UniqueNetIdRepl => "UniqueNetIdRepl",
-            StructType::KeyHandleMap => "KeyHandleMap",
-            StructType::RichCurveKey => "RichCurveKey",
-            StructType::Raw(t) => t,
-            StructType::Struct(Some(t)) => t,
-            _ => unreachable!(),
-        }
-    }
-    #[instrument(name = "StructType_read", skip_all)]
-    fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
-        Ok(ar.read_string()?.into())
-    }
-    fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
-        ar.write_string(self.as_str())?;
-        Ok(())
-    }
-    fn raw(&self) -> bool {
-        matches!(self, StructType::Raw(_))
-    }
+define_struct_types! {
+    ("/Script/CoreUObject", Guid),
+    ("/Script/CoreUObject", DateTime),
+    ("/Script/CoreUObject", Timespan),
+    ("/Script/CoreUObject", Vector2D),
+    ("/Script/CoreUObject", Vector),
+    ("/Script/CoreUObject", Vector4),
+    ("/Script/CoreUObject", IntVector),
+    ("/Script/CoreUObject", Box),
+    ("/Script/CoreUObject", Box2D),
+    ("/Script/CoreUObject", IntPoint),
+    ("/Script/CoreUObject", Quat),
+    ("/Script/CoreUObject", Rotator),
+    ("/Script/CoreUObject", LinearColor),
+    ("/Script/CoreUObject", Color),
+    ("/Script/CoreUObject", SoftObjectPath),
+    ("/Script/CoreUObject", SoftClassPath),
+    ("/Script/GameplayTags", GameplayTagContainer),
+    ("/Script/Engine", UniqueNetIdRepl),
+    ("/Script/Engine", KeyHandleMap),
+    ("/Script/Engine", RichCurveKey),
 }
 
 type DateTime = u64;
