@@ -198,6 +198,14 @@ impl<'de, 'a> DeserializeSeed<'de> for StructValueSeed<'a> {
             StructType::RichCurveKey => Ok(StructValue::RichCurveKey(
                 crate::FRichCurveKey::deserialize(deserializer)?,
             )),
+            StructType::SkeletalMeshSamplingLODBuiltData => {
+                Ok(StructValue::SkeletalMeshSamplingLODBuiltData(
+                    crate::FSkeletalMeshSamplingLODBuiltData::deserialize(deserializer)?,
+                ))
+            }
+            StructType::PerPlatformFloat => Ok(StructValue::PerPlatformFloat(
+                crate::FPerPlatformFloat::deserialize(deserializer)?,
+            )),
             StructType::Struct(_) => {
                 let props = PropertiesSeed {
                     path: self.path,

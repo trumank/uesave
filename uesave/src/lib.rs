@@ -1269,6 +1269,8 @@ define_struct_types! {
     ("/Script/Engine", UniqueNetIdRepl),
     ("/Script/Engine", KeyHandleMap),
     ("/Script/Engine", RichCurveKey),
+    ("/Script/Engine", SkeletalMeshSamplingLODBuiltData),
+    ("/Script/Engine", PerPlatformFloat),
 }
 
 type DateTime = u64;
@@ -2025,6 +2027,77 @@ impl FRichCurveKey {
     }
 }
 
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+pub struct FWeightedRandomSampler {
+    pub prob: Vec<Float>,
+    pub alias: Vec<i32>,
+    pub total_weight: Float,
+}
+impl FWeightedRandomSampler {
+    #[instrument(name = "FWeightedRandomSampler_read", skip_all)]
+    fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
+        Ok(Self {
+            prob: read_array(ar.read_u32::<LE>()?, ar, |r| Ok(r.read_f32::<LE>()?.into()))?,
+            alias: read_array(ar.read_u32::<LE>()?, ar, |r| Ok(r.read_i32::<LE>()?))?,
+            total_weight: ar.read_f32::<LE>()?.into(),
+        })
+    }
+    fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
+        ar.write_u32::<LE>(self.prob.len() as u32)?;
+        for p in &self.prob {
+            ar.write_f32::<LE>((*p).into())?;
+        }
+        ar.write_u32::<LE>(self.alias.len() as u32)?;
+        for a in &self.alias {
+            ar.write_i32::<LE>(*a)?;
+        }
+        ar.write_f32::<LE>(self.total_weight.into())?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+pub struct FSkeletalMeshSamplingLODBuiltData {
+    pub weighted_random_sampler: FWeightedRandomSampler,
+}
+impl FSkeletalMeshSamplingLODBuiltData {
+    #[instrument(name = "SkeletalMeshSamplingLODBuiltData_read", skip_all)]
+    fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
+        Ok(Self {
+            weighted_random_sampler: FWeightedRandomSampler::read(ar)?,
+        })
+    }
+    fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
+        self.weighted_random_sampler.write(ar)?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+pub struct FPerPlatformFloat {
+    pub is_cooked: bool,
+    pub value: Float,
+}
+impl FPerPlatformFloat {
+    #[instrument(name = "FPerPlatformFloat_read", skip_all)]
+    fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
+        let is_cooked = ar.read_u32::<LE>()? != 0;
+        assert!(
+            is_cooked,
+            "TODO implement !is_cooked (read map of platform => value)"
+        );
+        Ok(Self {
+            is_cooked,
+            value: ar.read_f32::<LE>()?.into(),
+        })
+    }
+    fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
+        ar.write_u32::<LE>(self.is_cooked as u32)?;
+        ar.write_f32::<LE>(self.value.into())?;
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SoftObjectPath {
     Old {
@@ -2537,6 +2610,8 @@ pub enum StructValue<T: ArchiveType = SaveGameArchiveType> {
     UniqueNetIdRepl(UniqueNetIdRepl),
     KeyHandleMap(FKeyHandleMap),
     RichCurveKey(FRichCurveKey),
+    SkeletalMeshSamplingLODBuiltData(FSkeletalMeshSamplingLODBuiltData),
+    PerPlatformFloat(FPerPlatformFloat),
     /// Raw struct data for other unknown structs serialized with HasBinaryOrNativeSerialize
     Raw(Vec<u8>),
     /// User defined struct which is simply a list of properties
@@ -2600,6 +2675,14 @@ impl<T: ArchiveType> StructValue<T> {
             StructType::UniqueNetIdRepl => StructValue::UniqueNetIdRepl(UniqueNetIdRepl::read(ar)?),
             StructType::KeyHandleMap => StructValue::KeyHandleMap(FKeyHandleMap::read(ar)?),
             StructType::RichCurveKey => StructValue::RichCurveKey(FRichCurveKey::read(ar)?),
+            StructType::SkeletalMeshSamplingLODBuiltData => {
+                StructValue::SkeletalMeshSamplingLODBuiltData(
+                    FSkeletalMeshSamplingLODBuiltData::read(ar)?,
+                )
+            }
+            StructType::PerPlatformFloat => {
+                StructValue::PerPlatformFloat(FPerPlatformFloat::read(ar)?)
+            }
             StructType::Raw(_) => unreachable!("should be handled at property level"),
             StructType::Struct(_) => StructValue::Struct(read_properties_until_none(ar)?),
         })
@@ -2626,6 +2709,8 @@ impl<T: ArchiveType> StructValue<T> {
             StructValue::UniqueNetIdRepl(v) => v.write(ar)?,
             StructValue::KeyHandleMap(v) => v.write(ar)?,
             StructValue::RichCurveKey(v) => v.write(ar)?,
+            StructValue::SkeletalMeshSamplingLODBuiltData(v) => v.write(ar)?,
+            StructValue::PerPlatformFloat(v) => v.write(ar)?,
             StructValue::Raw(v) => ar.write_all(v)?,
             StructValue::Struct(v) => write_properties_none_terminated(ar, v)?,
         }
