@@ -168,6 +168,7 @@ impl<'de, 'a> DeserializeSeed<'de> for StructValueSeed<'a> {
                 deserializer,
             )?)),
             StructType::Box => Ok(StructValue::Box(crate::Box::deserialize(deserializer)?)),
+            StructType::Box2D => Ok(StructValue::Box2D(crate::Box2D::deserialize(deserializer)?)),
             StructType::IntPoint => Ok(StructValue::IntPoint(crate::IntPoint::deserialize(
                 deserializer,
             )?)),
@@ -645,6 +646,7 @@ where
         Name(Vec<String>),
         Object(Vec<String>),
         Box(Vec<crate::Box>),
+        Box2D(Vec<crate::Box2D>),
     }
 
     let base = ValueVecBase::deserialize(deserializer)?;
@@ -668,5 +670,6 @@ where
         ValueVecBase::Name(v) => ValueVec::Name(v),
         ValueVecBase::Object(v) => ValueVec::Object(v),
         ValueVecBase::Box(v) => ValueVec::Box(v),
+        ValueVecBase::Box2D(v) => ValueVec::Box2D(v),
     })
 }

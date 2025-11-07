@@ -1224,6 +1224,7 @@ pub enum StructType {
     Vector4,
     IntVector,
     Box,
+    Box2D,
     IntPoint,
     Quat,
     Rotator,
@@ -1249,6 +1250,7 @@ impl From<&str> for StructType {
             "Vector4" => StructType::Vector4,
             "IntVector" => StructType::IntVector,
             "Box" => StructType::Box,
+            "Box2D" => StructType::Box2D,
             "IntPoint" => StructType::IntPoint,
             "Quat" => StructType::Quat,
             "Rotator" => StructType::Rotator,
@@ -1276,6 +1278,7 @@ impl From<String> for StructType {
             "Vector4" => StructType::Vector4,
             "IntVector" => StructType::IntVector,
             "Box" => StructType::Box,
+            "Box2D" => StructType::Box2D,
             "IntPoint" => StructType::IntPoint,
             "Quat" => StructType::Quat,
             "Rotator" => StructType::Rotator,
@@ -1303,6 +1306,7 @@ impl StructType {
             "/Script/CoreUObject.Vector4" => StructType::Vector4,
             "/Script/CoreUObject.IntVector" => StructType::IntVector,
             "/Script/CoreUObject.Box" => StructType::Box,
+            "/Script/CoreUObject.Box2D" => StructType::Box2D,
             "/Script/CoreUObject.IntPoint" => StructType::IntPoint,
             "/Script/CoreUObject.Quat" => StructType::Quat,
             "/Script/CoreUObject.Rotator" => StructType::Rotator,
@@ -1329,6 +1333,7 @@ impl StructType {
             StructType::Vector4 => "/Script/CoreUObject.Vector4",
             StructType::IntVector => "/Script/CoreUObject.IntVector",
             StructType::Box => "/Script/CoreUObject.Box",
+            StructType::Box2D => "/Script/CoreUObject.Box2D",
             StructType::IntPoint => "/Script/CoreUObject.IntPoint",
             StructType::Quat => "/Script/CoreUObject.Quat",
             StructType::Rotator => "/Script/CoreUObject.Rotator",
@@ -1355,6 +1360,7 @@ impl StructType {
             StructType::Vector4 => "Vector4",
             StructType::IntVector => "IntVector",
             StructType::Box => "Box",
+            StructType::Box2D => "Box2D",
             StructType::IntPoint => "IntPoint",
             StructType::Quat => "Quat",
             StructType::Rotator => "Rotator",
@@ -1946,6 +1952,28 @@ impl Vector2D {
             ar.write_f32::<LE>(self.x.into())?;
             ar.write_f32::<LE>(self.y.into())?;
         }
+        Ok(())
+    }
+}
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+pub struct Box2D {
+    pub min: Vector2D,
+    pub max: Vector2D,
+    pub is_valid: bool,
+}
+impl Box2D {
+    #[instrument(name = "Box2D_read", skip_all)]
+    fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
+        Ok(Self {
+            min: Vector2D::read(ar)?,
+            max: Vector2D::read(ar)?,
+            is_valid: ar.read_u8()? > 0,
+        })
+    }
+    fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
+        self.min.write(ar)?;
+        self.max.write(ar)?;
+        ar.write_u8(self.is_valid as u8)?;
         Ok(())
     }
 }
@@ -2616,6 +2644,7 @@ pub enum StructValue<T: ArchiveType = SaveGameArchiveType> {
     Vector4(Vector4),
     IntVector(IntVector),
     Box(Box),
+    Box2D(Box2D),
     IntPoint(IntPoint),
     Quat(Quat),
     LinearColor(LinearColor),
@@ -2657,6 +2686,7 @@ pub enum ValueVec<T: ArchiveType = SaveGameArchiveType> {
     Name(Vec<String>),
     Object(Vec<T::ObjectRef>),
     Box(Vec<Box>),
+    Box2D(Vec<Box2D>),
     Struct(Vec<StructValue<T>>),
 }
 
@@ -2675,6 +2705,7 @@ impl<T: ArchiveType> StructValue<T> {
             StructType::Vector4 => StructValue::Vector4(Vector4::read(ar)?),
             StructType::IntVector => StructValue::IntVector(IntVector::read(ar)?),
             StructType::Box => StructValue::Box(Box::read(ar)?),
+            StructType::Box2D => StructValue::Box2D(Box2D::read(ar)?),
             StructType::IntPoint => StructValue::IntPoint(IntPoint::read(ar)?),
             StructType::Quat => StructValue::Quat(Quat::read(ar)?),
             StructType::LinearColor => StructValue::LinearColor(LinearColor::read(ar)?),
@@ -2702,6 +2733,7 @@ impl<T: ArchiveType> StructValue<T> {
             StructValue::Vector4(v) => v.write(ar)?,
             StructValue::IntVector(v) => v.write(ar)?,
             StructValue::Box(v) => v.write(ar)?,
+            StructValue::Box2D(v) => v.write(ar)?,
             StructValue::IntPoint(v) => v.write(ar)?,
             StructValue::Quat(v) => v.write(ar)?,
             StructValue::LinearColor(v) => v.write(ar)?,
@@ -2901,6 +2933,12 @@ impl<T: ArchiveType> ValueVec<T> {
                 }
             }
             ValueVec::Box(v) => {
+                ar.write_u32::<LE>(v.len() as u32)?;
+                for i in v {
+                    i.write(ar)?;
+                }
+            }
+            ValueVec::Box2D(v) => {
                 ar.write_u32::<LE>(v.len() as u32)?;
                 for i in v {
                     i.write(ar)?;
