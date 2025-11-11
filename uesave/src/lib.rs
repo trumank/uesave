@@ -352,7 +352,7 @@ pub struct Properties<T: ArchiveType = SaveGameArchiveType>(
     pub indexmap::IndexMap<PropertyKey, Property<T>>,
 );
 impl<T: ArchiveType> Properties<T> {
-    fn insert(&mut self, k: impl Into<PropertyKey>, v: Property<T>) -> Option<Property<T>> {
+    pub fn insert(&mut self, k: impl Into<PropertyKey>, v: Property<T>) -> Option<Property<T>> {
         self.0.insert(k.into(), v)
     }
 }
@@ -392,7 +392,7 @@ pub fn read_properties_until_none<T: ArchiveType, A: ArchiveReader<ArchiveType =
     Ok(properties)
 }
 #[instrument(skip_all)]
-fn write_properties_none_terminated<T: ArchiveType, A: ArchiveWriter<ArchiveType = T>>(
+pub fn write_properties_none_terminated<T: ArchiveType, A: ArchiveWriter<ArchiveType = T>>(
     ar: &mut A,
     properties: &Properties<T>,
 ) -> Result<()> {
@@ -1204,7 +1204,7 @@ macro_rules! define_struct_types {
         }
 
         impl StructType {
-            fn from_full(t: &str, raw: bool) -> Self {
+            pub fn from_full(t: &str, raw: bool) -> Self {
                 match t {
                     $(concat!($package, ".", stringify!($variant)) => StructType::$variant,)*
                     "/Script/CoreUObject.Struct" => StructType::Struct(None),
@@ -1213,7 +1213,7 @@ macro_rules! define_struct_types {
                 }
             }
 
-            fn full_str(&self) -> &str {
+            pub fn full_str(&self) -> &str {
                 match self {
                     $(StructType::$variant => concat!($package, ".", stringify!($variant)),)*
                     StructType::Raw(t) => t,
@@ -1222,7 +1222,7 @@ macro_rules! define_struct_types {
                 }
             }
 
-            fn as_str(&self) -> &str {
+            pub fn as_str(&self) -> &str {
                 match self {
                     $(StructType::$variant => stringify!($variant),)*
                     StructType::Raw(t) => t,

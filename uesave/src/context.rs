@@ -41,12 +41,12 @@ impl PropertySchemas {
     }
 
     /// Record a schema at the given path
-    pub(crate) fn record(&mut self, path: String, tag: PropertyTagPartial) {
+    pub fn record(&mut self, path: String, tag: PropertyTagPartial) {
         self.schemas.insert(path, tag);
     }
 
     /// Get a schema at the given path
-    pub(crate) fn get(&self, path: &str) -> Option<&PropertyTagPartial> {
+    pub fn get(&self, path: &str) -> Option<&PropertyTagPartial> {
         self.schemas.get(path)
     }
 
