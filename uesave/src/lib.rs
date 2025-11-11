@@ -296,7 +296,7 @@ fn write_string_trailing<A: ArchiveWriter>(
     Ok(())
 }
 
-#[derive(Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PropertyKey(pub u32, pub String);
 impl From<String> for PropertyKey {
     fn from(value: String) -> Self {
@@ -346,7 +346,7 @@ impl Serialize for PropertyKey {
     }
 }
 
-#[derive(Debug, Default, PartialEq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
 #[serde(bound(serialize = "T::ObjectRef: Serialize"))]
 pub struct Properties<T: ArchiveType = SaveGameArchiveType>(
     pub indexmap::IndexMap<PropertyKey, Property<T>>,
@@ -1514,7 +1514,7 @@ impl Serialize for Double {
     }
 }
 
-#[derive(Debug, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct MapEntry<T: ArchiveType = SaveGameArchiveType> {
     pub key: Property<T>,
     pub value: Property<T>,
@@ -1537,7 +1537,7 @@ impl<T: ArchiveType> MapEntry<T> {
     }
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FieldPath {
     path: Vec<String>,
     owner: String,
@@ -1560,7 +1560,7 @@ impl FieldPath {
     }
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(bound(
     serialize = "T::ObjectRef: Serialize",
     deserialize = "T::ObjectRef: Deserialize<'de>"
@@ -1584,7 +1584,7 @@ impl<T: ArchiveType> Delegate<T> {
     }
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(bound(
     serialize = "T::ObjectRef: Serialize",
     deserialize = "T::ObjectRef: Deserialize<'de>"
@@ -1604,7 +1604,7 @@ impl<T: ArchiveType> MulticastDelegate<T> {
     }
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(bound(
     serialize = "T::ObjectRef: Serialize",
     deserialize = "T::ObjectRef: Deserialize<'de>"
@@ -1624,7 +1624,7 @@ impl<T: ArchiveType> MulticastInlineDelegate<T> {
     }
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(bound(
     serialize = "T::ObjectRef: Serialize",
     deserialize = "T::ObjectRef: Deserialize<'de>"
@@ -1644,7 +1644,7 @@ impl<T: ArchiveType> MulticastSparseDelegate<T> {
     }
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LinearColor {
     pub r: Float,
     pub g: Float,
@@ -1669,7 +1669,7 @@ impl LinearColor {
         Ok(())
     }
 }
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Quat {
     pub x: Double,
     pub y: Double,
@@ -1710,7 +1710,7 @@ impl Quat {
         Ok(())
     }
 }
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Rotator {
     pub x: Double,
     pub y: Double,
@@ -1746,7 +1746,7 @@ impl Rotator {
         Ok(())
     }
 }
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Color {
     pub r: u8,
     pub g: u8,
@@ -1771,7 +1771,7 @@ impl Color {
         Ok(())
     }
 }
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Vector {
     pub x: Double,
     pub y: Double,
@@ -1807,7 +1807,7 @@ impl Vector {
         Ok(())
     }
 }
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Vector2D {
     pub x: Double,
     pub y: Double,
@@ -1838,7 +1838,7 @@ impl Vector2D {
         Ok(())
     }
 }
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Box2D {
     pub min: Vector2D,
     pub max: Vector2D,
@@ -1860,7 +1860,7 @@ impl Box2D {
         Ok(())
     }
 }
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Vector4 {
     pub x: Double,
     pub y: Double,
@@ -1901,7 +1901,7 @@ impl Vector4 {
         Ok(())
     }
 }
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IntVector {
     pub x: i32,
     pub y: i32,
@@ -1923,7 +1923,7 @@ impl IntVector {
         Ok(())
     }
 }
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Box {
     pub min: Vector,
     pub max: Vector,
@@ -1945,7 +1945,7 @@ impl Box {
         Ok(())
     }
 }
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IntPoint {
     pub x: i32,
     pub y: i32,
@@ -1965,7 +1965,7 @@ impl IntPoint {
     }
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FKeyHandleMap {}
 impl FKeyHandleMap {
     #[instrument(name = "FKeyHandleMap_read", skip_all)]
@@ -1977,7 +1977,7 @@ impl FKeyHandleMap {
     }
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FRichCurveKey {
     /// Interpolation mode between this key and the next
     pub interp_mode: u8,
@@ -2027,7 +2027,7 @@ impl FRichCurveKey {
     }
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FWeightedRandomSampler {
     pub prob: Vec<Float>,
     pub alias: Vec<i32>,
@@ -2056,7 +2056,7 @@ impl FWeightedRandomSampler {
     }
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FSkeletalMeshSamplingLODBuiltData {
     pub weighted_random_sampler: FWeightedRandomSampler,
 }
@@ -2073,7 +2073,7 @@ impl FSkeletalMeshSamplingLODBuiltData {
     }
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FPerPlatformFloat {
     pub is_cooked: bool,
     pub value: Float,
@@ -2161,7 +2161,7 @@ impl SoftClassPath {
     }
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GameplayTag {
     pub name: String,
 }
@@ -2178,7 +2178,7 @@ impl GameplayTag {
     }
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GameplayTagContainer {
     pub gameplay_tags: Vec<GameplayTag>,
 }
@@ -2198,11 +2198,11 @@ impl GameplayTagContainer {
     }
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UniqueNetIdRepl {
     pub inner: Option<UniqueNetIdReplInner>,
 }
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UniqueNetIdReplInner {
     pub size: std::num::NonZeroU32,
     pub type_: String,
@@ -2236,7 +2236,7 @@ impl UniqueNetIdRepl {
     }
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FFormatArgumentData {
     name: String,
     value: FFormatArgumentDataValue,
@@ -2245,21 +2245,21 @@ impl FFormatArgumentData {
     #[instrument(name = "FFormatArgumentData_read", skip_all)]
     fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
         Ok(Self {
-            name: ar.read_string()?,
+            name: read_string(ar)?,
             value: FFormatArgumentDataValue::read(ar)?,
         })
     }
 }
 impl FFormatArgumentData {
     fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
-        ar.write_string(&self.name)?;
+        write_string(ar, &self.name)?;
         self.value.write(ar)?;
         Ok(())
     }
 }
 // very similar to FFormatArgumentValue but serializes ints as 32 bits (TODO changes to 64 bit
 // again at some later UE version)
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum FFormatArgumentDataValue {
     Int(i32),
     UInt(u32),
@@ -2317,7 +2317,7 @@ impl FFormatArgumentDataValue {
     }
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum FFormatArgumentValue {
     Int(i64),
     UInt(u64),
@@ -2376,7 +2376,7 @@ impl FFormatArgumentValue {
     }
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FNumberFormattingOptions {
     always_sign: bool,
     use_grouping: bool,
@@ -2413,12 +2413,12 @@ impl FNumberFormattingOptions {
     }
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Text {
     flags: u32,
     variant: TextVariant,
 }
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum TextVariant {
     // -0x1
     None {
@@ -2573,20 +2573,20 @@ impl Text {
 }
 
 /// Just a plain byte, or an enum in which case the variant will be a String
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Byte {
     Byte(u8),
     Label(String),
 }
 /// Vectorized [`Byte`]
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ByteArray {
     Byte(Vec<u8>),
     Label(Vec<String>),
 }
 
-#[derive(Debug, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(untagged)]
 #[serde(bound(serialize = "T::ObjectRef: Serialize, T::SoftObjectPath: Serialize"))]
 pub enum StructValue<T: ArchiveType = SaveGameArchiveType> {
@@ -2619,7 +2619,7 @@ pub enum StructValue<T: ArchiveType = SaveGameArchiveType> {
 }
 
 /// Vectorized properties to avoid storing the variant with each value
-#[derive(Debug, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(untagged)]
 #[serde(bound(serialize = "T::ObjectRef: Serialize, T::SoftObjectPath: Serialize"))]
 pub enum ValueVec<T: ArchiveType = SaveGameArchiveType> {
@@ -3046,7 +3046,7 @@ impl<T: ArchiveType> ValueVec<T> {
 
 /// Properties consist of a value and are present in [`Root`] and [`StructValue::Struct`]
 /// Property schemas (tags) are stored separately in [`PropertySchemas`]
-#[derive(Debug, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(untagged)]
 #[serde(bound(serialize = "T::ObjectRef: Serialize, T::SoftObjectPath: Serialize"))]
 pub enum Property<T: ArchiveType = SaveGameArchiveType> {
