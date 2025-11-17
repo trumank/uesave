@@ -31,11 +31,9 @@ pub trait ArchiveReader: Read + Seek {
 
     fn version(&self) -> &dyn VersionInfo;
 
-    /// Execute a closure with a modified scope for type hint lookups.
-    /// The scope is used to track the current property path (e.g., "root.PlayerData.Inventory")
-    fn with_scope<F, T>(&mut self, name: &str, f: F) -> T
-    where
-        F: FnOnce(&mut Self) -> T;
+    /// Get a mutable reference to the scope for tracking the current property path.
+    /// Use `scope().push(name)` and `scope().pop()` to manage the scope stack.
+    fn scope(&mut self) -> &mut crate::Scope;
 
     /// Look up a type hint for the current scope, returning the provided default if not found.
     /// Used to disambiguate struct types in Sets and Maps.
@@ -81,11 +79,9 @@ pub trait ArchiveWriter: Write + Seek {
     /// Set version information (typically called after reading/writing the header)
     fn set_version(&mut self, header: Header);
 
-    /// Execute a closure with a modified scope for type hint lookups.
-    /// The scope is used to track the current property path (e.g., "root.PlayerData.Inventory")
-    fn with_scope<F, T>(&mut self, name: &str, f: F) -> T
-    where
-        F: FnOnce(&mut Self) -> T;
+    /// Get a mutable reference to the scope for tracking the current property path.
+    /// Use `scope().push(name)` and `scope().pop()` to manage the scope stack.
+    fn scope(&mut self) -> &mut crate::Scope;
 
     /// Write a string to the archive
     fn write_string(&mut self, string: &str) -> Result<()>;
@@ -136,11 +132,8 @@ where
         SaveGameArchive::version(self)
     }
 
-    fn with_scope<F, T>(&mut self, name: &str, f: F) -> T
-    where
-        F: FnOnce(&mut Self) -> T,
-    {
-        SaveGameArchive::with_scope(self, name, f)
+    fn scope(&mut self) -> &mut crate::Scope {
+        &mut self.scope
     }
 
     fn get_type_or(&mut self, default: &StructType) -> Result<StructType> {
@@ -193,11 +186,8 @@ where
         SaveGameArchive::set_version(self, header)
     }
 
-    fn with_scope<F, T>(&mut self, name: &str, f: F) -> T
-    where
-        F: FnOnce(&mut Self) -> T,
-    {
-        SaveGameArchive::with_scope(self, name, f)
+    fn scope(&mut self) -> &mut crate::Scope {
+        &mut self.scope
     }
 
     fn write_string(&mut self, string: &str) -> Result<()> {

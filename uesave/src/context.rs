@@ -59,24 +59,24 @@ impl PropertySchemas {
 /// Represents the current position in the property hierarchy as a stack of names.
 /// Used for looking up type hints in the Types map.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct Scope {
+pub struct Scope {
     components: Vec<String>,
 }
 
 impl Scope {
-    pub(crate) fn root() -> Self {
+    pub fn root() -> Self {
         Self::default()
     }
 
-    pub(crate) fn path(&self) -> String {
+    pub fn path(&self) -> String {
         self.components.join(".")
     }
 
-    pub(crate) fn push(&mut self, name: &str) {
+    pub fn push(&mut self, name: &str) {
         self.components.push(name.to_string());
     }
 
-    pub(crate) fn pop(&mut self) {
+    pub fn pop(&mut self) {
         self.components.pop();
     }
 }
@@ -124,15 +124,6 @@ impl<S> SaveGameArchive<S> {
             error_to_raw: false,
             schemas: Rc::new(RefCell::new(PropertySchemas::new())),
         })
-    }
-    pub(crate) fn with_scope<F, T>(&mut self, name: &str, f: F) -> T
-    where
-        F: FnOnce(&mut Self) -> T,
-    {
-        self.scope.push(name);
-        let result = f(self);
-        self.scope.pop();
-        result
     }
     fn path(&self) -> String {
         self.scope.path()

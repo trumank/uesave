@@ -36,11 +36,11 @@ mod serialization;
 mod tests;
 
 pub use archive::{ArchiveReader, ArchiveType, ArchiveWriter, SaveGameArchiveType};
-pub use context::{PropertySchemas, Types};
+pub use context::{PropertySchemas, Scope, Types};
 pub use error::{Error, ParseError};
 
 use byteorder::{ReadBytesExt, WriteBytesExt, LE};
-use context::{SaveGameArchive, Scope};
+use context::SaveGameArchive;
 use std::{
     borrow::Cow,
     cell::RefCell,
@@ -409,13 +409,10 @@ fn read_property<T: ArchiveType, A: ArchiveReader<ArchiveType = T>>(
 ) -> Result<Option<(PropertyKey, Property<T>)>> {
     if let Some(mut tag) = PropertyTagFull::read(ar)? {
         let tag_name = tag.name.to_string();
-        let (value, updated_tag_data) = ar.with_scope(
-            &tag_name,
-            |ar| -> Result<(Property<T>, Option<PropertyTagDataFull>)> {
-                // Read the property - it may discover additional type information (e.g., struct types in arrays)
-                Property::read(ar, tag.clone())
-            },
-        )?;
+        ar.scope().push(&tag_name);
+        let result = Property::read(ar, tag.clone());
+        ar.scope().pop();
+        let (value, updated_tag_data) = result?;
 
         // If type information was refined during reading (e.g., array of structs in older UE versions),
         // update the tag data and record the complete schema
@@ -426,10 +423,9 @@ fn read_property<T: ArchiveType, A: ArchiveReader<ArchiveType = T>>(
         let key = PropertyKey(tag.index, tag_name.clone());
 
         // Record the final, complete schema
-        ar.with_scope(&tag_name, |ar| -> Result<()> {
-            ar.record_schema(ar.path().to_string(), tag.into_partial());
-            Ok(())
-        })?;
+        ar.scope().push(&tag_name);
+        ar.record_schema(ar.path().to_string(), tag.into_partial());
+        ar.scope().pop();
 
         Ok(Some((key, value)))
     } else {
@@ -441,7 +437,8 @@ fn write_property<T: ArchiveType, A: ArchiveWriter<ArchiveType = T>>(
     prop: (&PropertyKey, &Property<T>),
     ar: &mut A,
 ) -> Result<()> {
-    ar.with_scope(&prop.0 .1, |ar| {
+    ar.scope().push(&prop.0 .1);
+    let result = (|| {
         let tag_partial = ar
             .get_schema(&ar.path())
             .ok_or_else(|| Error::MissingPropertySchema(ar.path()))?;
@@ -469,7 +466,9 @@ fn write_property<T: ArchiveType, A: ArchiveWriter<ArchiveType = T>>(
         // Seek to end to continue writing
         ar.seek(std::io::SeekFrom::Start(data_end))?;
         Ok(())
-    })
+    })();
+    ar.scope().pop();
+    result
 }
 
 #[instrument(skip_all)]
@@ -868,7 +867,8 @@ impl PropertyTagFull<'_> {
 
             Ok(Some(tag))
         } else {
-            ar.with_scope(&name.clone(), |ar| {
+            ar.scope().push(&name.clone());
+            let result = (|| {
                 let type_ = PropertyType::read(ar)?;
                 let size = ar.read_u32::<LE>()?;
                 let index = ar.read_u32::<LE>()?;
@@ -933,15 +933,21 @@ impl PropertyTagFull<'_> {
                         let key_type = PropertyType::read(ar)?;
                         let key_struct_type = match key_type {
                             PropertyType::StructProperty => {
-                                Some(ar.with_scope("Key", |r| r.get_type_or(&StructType::Guid))?)
+                                ar.scope().push("Key");
+                                let result = ar.get_type_or(&StructType::Guid);
+                                ar.scope().pop();
+                                Some(result?)
                             }
                             _ => None,
                         };
                         let value_type = PropertyType::read(ar)?;
                         let value_struct_type = match value_type {
-                            PropertyType::StructProperty => Some(ar.with_scope("Value", |r| {
-                                r.get_type_or(&StructType::Struct(None))
-                            })?),
+                            PropertyType::StructProperty => {
+                                ar.scope().push("Value");
+                                let result = ar.get_type_or(&StructType::Struct(None));
+                                ar.scope().pop();
+                                Some(result?)
+                            }
                             _ => None,
                         };
 
@@ -978,7 +984,9 @@ impl PropertyTagFull<'_> {
                     id,
                     data,
                 }))
-            })
+            })();
+            ar.scope().pop();
+            result
         }
     }
     fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
