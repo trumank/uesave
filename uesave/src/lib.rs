@@ -1071,11 +1071,18 @@ impl PropertyTagFull<'_> {
 
             ar.write_u32::<LE>(self.size)?;
 
+            if self.index != 0 {
+                flags |= EPropertyTagFlags::HasArrayIndex;
+            }
             if self.id.is_some() {
                 flags |= EPropertyTagFlags::HasPropertyGuid;
             }
 
             ar.write_u8(flags.bits())?;
+
+            if self.index != 0 {
+                ar.write_u32::<LE>(self.index)?;
+            }
         } else {
             self.data.basic_type().write(ar)?;
             ar.write_u32::<LE>(self.size)?;
