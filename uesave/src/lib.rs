@@ -50,6 +50,7 @@ use std::{
 
 use serde::{de::Visitor, Deserialize, Deserializer, Serialize, Serializer};
 
+#[cfg(feature = "tracing")]
 use tracing::instrument;
 
 type Result<T, E = Error> = std::result::Result<T, E>;
@@ -188,7 +189,7 @@ impl<R: Read> Read for SeekReader<R> {
     }
 }
 
-#[instrument(skip_all)]
+#[cfg_attr(feature = "tracing", instrument(skip_all))]
 fn read_optional_uuid<A: ArchiveReader>(ar: &mut A) -> Result<Option<FGuid>> {
     Ok(if ar.read_u8()? > 0 {
         Some(FGuid::read(ar)?)
@@ -206,7 +207,7 @@ fn write_optional_uuid<A: ArchiveWriter>(ar: &mut A, id: Option<FGuid>) -> Resul
     Ok(())
 }
 
-#[instrument(skip_all, ret)]
+#[cfg_attr(feature = "tracing", instrument(skip_all, ret))]
 fn read_string<A: ArchiveReader>(ar: &mut A) -> Result<String> {
     let len = ar.read_i32::<LE>()?;
     if len < 0 {
@@ -220,7 +221,7 @@ fn read_string<A: ArchiveReader>(ar: &mut A) -> Result<String> {
         Ok(String::from_utf8_lossy(&chars[..length]).into_owned())
     }
 }
-#[instrument(skip(ar))]
+#[cfg_attr(feature = "tracing", instrument(skip(ar)))]
 fn write_string<A: ArchiveWriter>(ar: &mut A, string: &str) -> Result<()> {
     if string.is_empty() {
         ar.write_u32::<LE>(0)?;
@@ -230,7 +231,7 @@ fn write_string<A: ArchiveWriter>(ar: &mut A, string: &str) -> Result<()> {
     Ok(())
 }
 
-#[instrument(skip_all)]
+#[cfg_attr(feature = "tracing", instrument(skip_all))]
 fn read_string_trailing<A: ArchiveReader>(ar: &mut A) -> Result<(String, Vec<u8>)> {
     let len = ar.read_i32::<LE>()?;
     if len < 0 {
@@ -275,7 +276,7 @@ fn read_string_trailing<A: ArchiveReader>(ar: &mut A) -> Result<(String, Vec<u8>
         Ok((String::from_utf8(chars).unwrap(), rest))
     }
 }
-#[instrument(skip_all)]
+#[cfg_attr(feature = "tracing", instrument(skip_all))]
 fn write_string_trailing<A: ArchiveWriter>(
     ar: &mut A,
     string: &str,
@@ -381,7 +382,7 @@ impl<'a, T: ArchiveType> IntoIterator for &'a Properties<T> {
     }
 }
 
-#[instrument(skip_all)]
+#[cfg_attr(feature = "tracing", instrument(skip_all))]
 pub fn read_properties_until_none<T: ArchiveType, A: ArchiveReader<ArchiveType = T>>(
     ar: &mut A,
 ) -> Result<Properties<T>> {
@@ -391,7 +392,7 @@ pub fn read_properties_until_none<T: ArchiveType, A: ArchiveReader<ArchiveType =
     }
     Ok(properties)
 }
-#[instrument(skip_all)]
+#[cfg_attr(feature = "tracing", instrument(skip_all))]
 pub fn write_properties_none_terminated<T: ArchiveType, A: ArchiveWriter<ArchiveType = T>>(
     ar: &mut A,
     properties: &Properties<T>,
@@ -403,7 +404,7 @@ pub fn write_properties_none_terminated<T: ArchiveType, A: ArchiveWriter<Archive
     Ok(())
 }
 
-#[instrument(skip_all)]
+#[cfg_attr(feature = "tracing", instrument(skip_all))]
 fn read_property<T: ArchiveType, A: ArchiveReader<ArchiveType = T>>(
     ar: &mut A,
 ) -> Result<Option<(PropertyKey, Property<T>)>> {
@@ -432,7 +433,7 @@ fn read_property<T: ArchiveType, A: ArchiveReader<ArchiveType = T>>(
         Ok(None)
     }
 }
-#[instrument(skip_all)]
+#[cfg_attr(feature = "tracing", instrument(skip_all))]
 fn write_property<T: ArchiveType, A: ArchiveWriter<ArchiveType = T>>(
     prop: (&PropertyKey, &Property<T>),
     ar: &mut A,
@@ -471,7 +472,7 @@ fn write_property<T: ArchiveType, A: ArchiveWriter<ArchiveType = T>>(
     result
 }
 
-#[instrument(skip_all)]
+#[cfg_attr(feature = "tracing", instrument(skip_all))]
 fn read_array<T, F, A: ArchiveReader>(length: u32, ar: &mut A, f: F) -> Result<Vec<T>>
 where
     F: Fn(&mut A) -> Result<T>,
@@ -569,7 +570,7 @@ impl<'de> Deserialize<'de> for FGuid {
 }
 
 impl FGuid {
-    #[instrument(name = "FGuid_read", skip_all)]
+    #[cfg_attr(feature = "tracing", instrument(name = "FGuid_read", skip_all))]
     fn read<A: ArchiveReader>(ar: &mut A) -> Result<FGuid> {
         Ok(Self {
             a: ar.read_u32::<LE>()?,
@@ -580,7 +581,7 @@ impl FGuid {
     }
 }
 impl FGuid {
-    #[instrument(name = "FGuid_write", skip_all)]
+    #[cfg_attr(feature = "tracing", instrument(name = "FGuid_write", skip_all))]
     fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
         ar.write_u32::<LE>(self.a)?;
         ar.write_u32::<LE>(self.b)?;
@@ -768,7 +769,7 @@ impl PropertyTagFull<'_> {
             data: self.data.into_partial(),
         }
     }
-    #[instrument(name = "PropertyTag_read", skip_all)]
+    #[cfg_attr(feature = "tracing", instrument(name = "PropertyTag_read", skip_all))]
     fn read<A: ArchiveReader>(ar: &mut A) -> Result<Option<Self>> {
         let name = ar.read_string()?;
         if name == "None" {
@@ -1139,7 +1140,7 @@ macro_rules! define_property_types {
                 }
             }
 
-            #[instrument(name = "PropertyType_read", skip_all)]
+            #[cfg_attr(feature = "tracing", instrument(name = "PropertyType_read", skip_all))]
             fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
                 Self::try_from(&ar.read_string()?)
             }
@@ -1246,7 +1247,7 @@ macro_rules! define_struct_types {
                 }
             }
 
-            #[instrument(name = "StructType_read", skip_all)]
+            #[cfg_attr(feature = "tracing", instrument(name = "StructType_read", skip_all))]
             fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
                 Ok(ar.read_string()?.into())
             }
@@ -1535,7 +1536,7 @@ pub struct MapEntry<T: ArchiveType = SaveGameArchiveType> {
     pub value: Property<T>,
 }
 impl<T: ArchiveType> MapEntry<T> {
-    #[instrument(name = "MapEntry_read", skip_all)]
+    #[cfg_attr(feature = "tracing", instrument(name = "MapEntry_read", skip_all))]
     fn read<A: ArchiveReader<ArchiveType = T>>(
         ar: &mut A,
         key_type: &PropertyTagDataFull,
@@ -1558,7 +1559,7 @@ pub struct FieldPath {
     owner: String,
 }
 impl FieldPath {
-    #[instrument(name = "FieldPath_read", skip_all)]
+    #[cfg_attr(feature = "tracing", instrument(name = "FieldPath_read", skip_all))]
     fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
         Ok(Self {
             path: read_array(ar.read_u32::<LE>()?, ar, |ar| ar.read_string())?,
@@ -1585,7 +1586,7 @@ pub struct Delegate<T: ArchiveType = SaveGameArchiveType> {
     pub delegate: String,
 }
 impl<T: ArchiveType> Delegate<T> {
-    #[instrument(name = "Delegate_read", skip_all)]
+    #[cfg_attr(feature = "tracing", instrument(name = "Delegate_read", skip_all))]
     fn read<A: ArchiveReader<ArchiveType = T>>(ar: &mut A) -> Result<Self> {
         Ok(Self {
             object: ar.read_object_ref()?,
@@ -1606,7 +1607,10 @@ impl<T: ArchiveType> Delegate<T> {
 ))]
 pub struct MulticastDelegate<T: ArchiveType = SaveGameArchiveType>(pub Vec<Delegate<T>>);
 impl<T: ArchiveType> MulticastDelegate<T> {
-    #[instrument(name = "MulticastDelegate_read", skip_all)]
+    #[cfg_attr(
+        feature = "tracing",
+        instrument(name = "MulticastDelegate_read", skip_all)
+    )]
     fn read<A: ArchiveReader<ArchiveType = T>>(ar: &mut A) -> Result<Self> {
         Ok(Self(read_array(ar.read_u32::<LE>()?, ar, Delegate::read)?))
     }
@@ -1626,7 +1630,10 @@ impl<T: ArchiveType> MulticastDelegate<T> {
 ))]
 pub struct MulticastInlineDelegate<T: ArchiveType = SaveGameArchiveType>(pub Vec<Delegate<T>>);
 impl<T: ArchiveType> MulticastInlineDelegate<T> {
-    #[instrument(name = "MulticastInlineDelegate_read", skip_all)]
+    #[cfg_attr(
+        feature = "tracing",
+        instrument(name = "MulticastInlineDelegate_read", skip_all)
+    )]
     fn read<A: ArchiveReader<ArchiveType = T>>(ar: &mut A) -> Result<Self> {
         Ok(Self(read_array(ar.read_u32::<LE>()?, ar, Delegate::read)?))
     }
@@ -1646,7 +1653,10 @@ impl<T: ArchiveType> MulticastInlineDelegate<T> {
 ))]
 pub struct MulticastSparseDelegate<T: ArchiveType = SaveGameArchiveType>(pub Vec<Delegate<T>>);
 impl<T: ArchiveType> MulticastSparseDelegate<T> {
-    #[instrument(name = "MulticastSparseDelegate_read", skip_all)]
+    #[cfg_attr(
+        feature = "tracing",
+        instrument(name = "MulticastSparseDelegate_read", skip_all)
+    )]
     fn read<A: ArchiveReader<ArchiveType = T>>(ar: &mut A) -> Result<Self> {
         Ok(Self(read_array(ar.read_u32::<LE>()?, ar, Delegate::read)?))
     }
@@ -1667,7 +1677,7 @@ pub struct LinearColor {
     pub a: Float,
 }
 impl LinearColor {
-    #[instrument(name = "LinearColor_read", skip_all)]
+    #[cfg_attr(feature = "tracing", instrument(name = "LinearColor_read", skip_all))]
     fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
         Ok(Self {
             r: ar.read_f32::<LE>()?.into(),
@@ -1692,7 +1702,7 @@ pub struct Quat {
     pub w: Double,
 }
 impl Quat {
-    #[instrument(name = "Quat_read", skip_all)]
+    #[cfg_attr(feature = "tracing", instrument(name = "Quat_read", skip_all))]
     fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
         if ar.version().large_world_coordinates() {
             Ok(Self {
@@ -1732,7 +1742,7 @@ pub struct Rotator {
     pub z: Double,
 }
 impl Rotator {
-    #[instrument(name = "Rotator_read", skip_all)]
+    #[cfg_attr(feature = "tracing", instrument(name = "Rotator_read", skip_all))]
     fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
         if ar.version().large_world_coordinates() {
             Ok(Self {
@@ -1769,7 +1779,7 @@ pub struct Color {
     pub a: u8,
 }
 impl Color {
-    #[instrument(name = "Color_read", skip_all)]
+    #[cfg_attr(feature = "tracing", instrument(name = "Color_read", skip_all))]
     fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
         Ok(Self {
             r: ar.read_u8()?,
@@ -1793,7 +1803,7 @@ pub struct Vector {
     pub z: Double,
 }
 impl Vector {
-    #[instrument(name = "Vector_read", skip_all)]
+    #[cfg_attr(feature = "tracing", instrument(name = "Vector_read", skip_all))]
     fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
         if ar.version().large_world_coordinates() {
             Ok(Self {
@@ -1828,7 +1838,7 @@ pub struct Vector2D {
     pub y: Double,
 }
 impl Vector2D {
-    #[instrument(name = "Vector2D_read", skip_all)]
+    #[cfg_attr(feature = "tracing", instrument(name = "Vector2D_read", skip_all))]
     fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
         if ar.version().large_world_coordinates() {
             Ok(Self {
@@ -1860,7 +1870,7 @@ pub struct Box2D {
     pub is_valid: bool,
 }
 impl Box2D {
-    #[instrument(name = "Box2D_read", skip_all)]
+    #[cfg_attr(feature = "tracing", instrument(name = "Box2D_read", skip_all))]
     fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
         Ok(Self {
             min: Vector2D::read(ar)?,
@@ -1883,7 +1893,7 @@ pub struct Vector4 {
     pub w: Double,
 }
 impl Vector4 {
-    #[instrument(name = "Vector4_read", skip_all)]
+    #[cfg_attr(feature = "tracing", instrument(name = "Vector4_read", skip_all))]
     fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
         if ar.version().large_world_coordinates() {
             Ok(Self {
@@ -1923,7 +1933,7 @@ pub struct IntVector {
     pub z: i32,
 }
 impl IntVector {
-    #[instrument(name = "IntVector_read", skip_all)]
+    #[cfg_attr(feature = "tracing", instrument(name = "IntVector_read", skip_all))]
     fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
         Ok(Self {
             x: ar.read_i32::<LE>()?,
@@ -1945,7 +1955,7 @@ pub struct Box {
     pub is_valid: bool,
 }
 impl Box {
-    #[instrument(name = "Box_read", skip_all)]
+    #[cfg_attr(feature = "tracing", instrument(name = "Box_read", skip_all))]
     fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
         Ok(Self {
             min: Vector::read(ar)?,
@@ -1966,7 +1976,7 @@ pub struct IntPoint {
     pub y: i32,
 }
 impl IntPoint {
-    #[instrument(name = "IntPoint_read", skip_all)]
+    #[cfg_attr(feature = "tracing", instrument(name = "IntPoint_read", skip_all))]
     fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
         Ok(Self {
             x: ar.read_i32::<LE>()?,
@@ -1983,7 +1993,7 @@ impl IntPoint {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FKeyHandleMap {}
 impl FKeyHandleMap {
-    #[instrument(name = "FKeyHandleMap_read", skip_all)]
+    #[cfg_attr(feature = "tracing", instrument(name = "FKeyHandleMap_read", skip_all))]
     fn read<A: ArchiveReader>(_ar: &mut A) -> Result<Self> {
         Ok(Self {})
     }
@@ -2014,7 +2024,7 @@ pub struct FRichCurveKey {
     pub leave_tangent_weight: Float,
 }
 impl FRichCurveKey {
-    #[instrument(name = "FRichCurveKey_read", skip_all)]
+    #[cfg_attr(feature = "tracing", instrument(name = "FRichCurveKey_read", skip_all))]
     fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
         Ok(Self {
             interp_mode: ar.read_u8()?,
@@ -2049,7 +2059,10 @@ pub struct FWeightedRandomSampler {
     pub total_weight: Float,
 }
 impl FWeightedRandomSampler {
-    #[instrument(name = "FWeightedRandomSampler_read", skip_all)]
+    #[cfg_attr(
+        feature = "tracing",
+        instrument(name = "FWeightedRandomSampler_read", skip_all)
+    )]
     fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
         Ok(Self {
             prob: read_array(ar.read_u32::<LE>()?, ar, |r| Ok(r.read_f32::<LE>()?.into()))?,
@@ -2076,7 +2089,10 @@ pub struct FSkeletalMeshSamplingLODBuiltData {
     pub weighted_random_sampler: FWeightedRandomSampler,
 }
 impl FSkeletalMeshSamplingLODBuiltData {
-    #[instrument(name = "SkeletalMeshSamplingLODBuiltData_read", skip_all)]
+    #[cfg_attr(
+        feature = "tracing",
+        instrument(name = "SkeletalMeshSamplingLODBuiltData_read", skip_all)
+    )]
     fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
         Ok(Self {
             weighted_random_sampler: FWeightedRandomSampler::read(ar)?,
@@ -2094,7 +2110,10 @@ pub struct FPerPlatformFloat {
     pub value: Float,
 }
 impl FPerPlatformFloat {
-    #[instrument(name = "FPerPlatformFloat_read", skip_all)]
+    #[cfg_attr(
+        feature = "tracing",
+        instrument(name = "FPerPlatformFloat_read", skip_all)
+    )]
     fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
         let is_cooked = ar.read_u32::<LE>()? != 0;
         assert!(
@@ -2126,7 +2145,10 @@ pub enum SoftObjectPath {
     },
 }
 impl SoftObjectPath {
-    #[instrument(name = "SoftObjectPath_read", skip_all)]
+    #[cfg_attr(
+        feature = "tracing",
+        instrument(name = "SoftObjectPath_read", skip_all)
+    )]
     fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
         Ok(if ar.version().remove_asset_path_fnames() {
             Self::New {
@@ -2167,7 +2189,7 @@ impl SoftObjectPath {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SoftClassPath(pub SoftObjectPath);
 impl SoftClassPath {
-    #[instrument(name = "SoftClassPath_read", skip_all)]
+    #[cfg_attr(feature = "tracing", instrument(name = "SoftClassPath_read", skip_all))]
     fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
         Ok(Self(SoftObjectPath::read(ar)?))
     }
@@ -2181,7 +2203,7 @@ pub struct GameplayTag {
     pub name: String,
 }
 impl GameplayTag {
-    #[instrument(name = "GameplayTag_read", skip_all)]
+    #[cfg_attr(feature = "tracing", instrument(name = "GameplayTag_read", skip_all))]
     fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
         Ok(Self {
             name: ar.read_string()?,
@@ -2198,7 +2220,10 @@ pub struct GameplayTagContainer {
     pub gameplay_tags: Vec<GameplayTag>,
 }
 impl GameplayTagContainer {
-    #[instrument(name = "GameplayTagContainer_read", skip_all)]
+    #[cfg_attr(
+        feature = "tracing",
+        instrument(name = "GameplayTagContainer_read", skip_all)
+    )]
     fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
         Ok(Self {
             gameplay_tags: read_array(ar.read_u32::<LE>()?, ar, GameplayTag::read)?,
@@ -2224,7 +2249,10 @@ pub struct UniqueNetIdReplInner {
     pub contents: String,
 }
 impl UniqueNetIdRepl {
-    #[instrument(name = "UniqueNetIdRepl_read", skip_all)]
+    #[cfg_attr(
+        feature = "tracing",
+        instrument(name = "UniqueNetIdRepl_read", skip_all)
+    )]
     fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
         let size = ar.read_u32::<LE>()?;
         let inner = if let Ok(size) = size.try_into() {
@@ -2257,7 +2285,10 @@ pub struct FFormatArgumentData {
     value: FFormatArgumentDataValue,
 }
 impl FFormatArgumentData {
-    #[instrument(name = "FFormatArgumentData_read", skip_all)]
+    #[cfg_attr(
+        feature = "tracing",
+        instrument(name = "FFormatArgumentData_read", skip_all)
+    )]
     fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
         Ok(Self {
             name: read_string(ar)?,
@@ -2284,7 +2315,10 @@ pub enum FFormatArgumentDataValue {
     Gender(u64),
 }
 impl FFormatArgumentDataValue {
-    #[instrument(name = "FFormatArgumentDataValue_read", skip_all)]
+    #[cfg_attr(
+        feature = "tracing",
+        instrument(name = "FFormatArgumentDataValue_read", skip_all)
+    )]
     fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
         let type_ = ar.read_u8()?;
         match type_ {
@@ -2343,7 +2377,10 @@ pub enum FFormatArgumentValue {
 }
 
 impl FFormatArgumentValue {
-    #[instrument(name = "FFormatArgumentValue_read", skip_all)]
+    #[cfg_attr(
+        feature = "tracing",
+        instrument(name = "FFormatArgumentValue_read", skip_all)
+    )]
     fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
         let type_ = ar.read_u8()?;
         match type_ {
@@ -2402,7 +2439,10 @@ pub struct FNumberFormattingOptions {
     maximum_fractional_digits: i32,
 }
 impl FNumberFormattingOptions {
-    #[instrument(name = "FNumberFormattingOptions_read", skip_all)]
+    #[cfg_attr(
+        feature = "tracing",
+        instrument(name = "FNumberFormattingOptions_read", skip_all)
+    )]
     fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
         Ok(Self {
             always_sign: ar.read_u32::<LE>()? != 0,
@@ -2472,7 +2512,7 @@ pub enum TextVariant {
 }
 
 impl Text {
-    #[instrument(name = "Text_read", skip_all)]
+    #[cfg_attr(feature = "tracing", instrument(name = "Text_read", skip_all))]
     fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
         let flags = ar.read_u32::<LE>()?;
         let text_history_type = ar.read_i8()?;
@@ -2662,7 +2702,7 @@ pub enum ValueVec<T: ArchiveType = SaveGameArchiveType> {
 }
 
 impl<T: ArchiveType> StructValue<T> {
-    #[instrument(name = "StructValue_read", skip_all)]
+    #[cfg_attr(feature = "tracing", instrument(name = "StructValue_read", skip_all))]
     fn read<A: ArchiveReader<ArchiveType = T>>(
         ar: &mut A,
         t: &StructType,
@@ -2733,7 +2773,7 @@ impl<T: ArchiveType> StructValue<T> {
     }
 }
 impl<T: ArchiveType> ValueVec<T> {
-    #[instrument(name = "ValueVec_read", skip_all)]
+    #[cfg_attr(feature = "tracing", instrument(name = "ValueVec_read", skip_all))]
     fn read<A: ArchiveReader<ArchiveType = T>>(
         ar: &mut A,
         t: &PropertyType,
@@ -2936,7 +2976,10 @@ impl<T: ArchiveType> ValueVec<T> {
     }
 }
 impl<T: ArchiveType> ValueVec<T> {
-    #[instrument(name = "ValueVec_read_array", skip_all)]
+    #[cfg_attr(
+        feature = "tracing",
+        instrument(name = "ValueVec_read_array", skip_all)
+    )]
     fn read_array<A: ArchiveReader<ArchiveType = T>>(
         ar: &mut A,
         tag: PropertyTagDataFull,
@@ -3041,7 +3084,7 @@ impl<T: ArchiveType> ValueVec<T> {
         }
         Ok(())
     }
-    #[instrument(name = "ValueVec_read_set", skip_all)]
+    #[cfg_attr(feature = "tracing", instrument(name = "ValueVec_read_set", skip_all))]
     fn read_set<A: ArchiveReader<ArchiveType = T>>(
         ar: &mut A,
         t: &PropertyTagDataFull,
@@ -3097,7 +3140,7 @@ pub enum Property<T: ArchiveType = SaveGameArchiveType> {
 }
 
 impl<T: ArchiveType> Property<T> {
-    #[instrument(name = "Property_read", skip_all)]
+    #[cfg_attr(feature = "tracing", instrument(name = "Property_read", skip_all))]
     fn read<A: ArchiveReader<ArchiveType = T>>(
         ar: &mut A,
         tag: PropertyTagFull,
@@ -3244,7 +3287,10 @@ impl<T: ArchiveType> Property<T> {
         Ok(())
     }
 
-    #[instrument(name = "Property_read_value", skip_all)]
+    #[cfg_attr(
+        feature = "tracing",
+        instrument(name = "Property_read_value", skip_all)
+    )]
     fn read_value<A: ArchiveReader<ArchiveType = T>>(
         ar: &mut A,
         t: &PropertyTagDataFull,
@@ -3357,7 +3403,10 @@ pub struct CustomFormatData {
     pub value: i32,
 }
 impl CustomFormatData {
-    #[instrument(name = "CustomFormatData_read", skip_all)]
+    #[cfg_attr(
+        feature = "tracing",
+        instrument(name = "CustomFormatData_read", skip_all)
+    )]
     fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
         Ok(CustomFormatData {
             id: FGuid::read(ar)?,
@@ -3446,7 +3495,7 @@ impl VersionInfo for Header {
     }
 }
 impl Header {
-    #[instrument(name = "Header_read", skip_all)]
+    #[cfg_attr(feature = "tracing", instrument(name = "Header_read", skip_all))]
     fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
         let magic = ar.read_u32::<LE>()?;
         if ar.log() && magic != u32::from_le_bytes(*b"GVAS") {
@@ -3520,7 +3569,7 @@ pub struct Root {
     pub properties: Properties,
 }
 impl Root {
-    #[instrument(name = "Root_read", skip_all)]
+    #[cfg_attr(feature = "tracing", instrument(name = "Root_read", skip_all))]
     fn read<A: ArchiveReader<ArchiveType = SaveGameArchiveType>>(ar: &mut A) -> Result<Self> {
         let save_game_type = ar.read_string()?;
         if ar.version().property_tag() {
@@ -3552,12 +3601,15 @@ pub struct Save {
 }
 impl Save {
     /// Reads save from the given reader
-    #[instrument(name = "Root_read", skip_all)]
+    #[cfg_attr(feature = "tracing", instrument(name = "Root_read", skip_all))]
     pub fn read<R: Read>(reader: &mut R) -> Result<Self, ParseError> {
         Self::read_with_types(reader, Types::new())
     }
     /// Reads save from the given reader using the provided [`Types`]
-    #[instrument(name = "Save_read_with_types", skip_all)]
+    #[cfg_attr(
+        feature = "tracing",
+        instrument(name = "Save_read_with_types", skip_all)
+    )]
     pub fn read_with_types<R: Read>(reader: &mut R, types: Types) -> Result<Self, ParseError> {
         SaveReader::new().types(types).read(reader)
     }
