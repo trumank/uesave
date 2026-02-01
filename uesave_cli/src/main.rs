@@ -74,6 +74,7 @@ struct ActionTestResave {
     no_warn: bool,
 
     /// Trace and generate trace.json file
+    #[cfg(feature = "tracing")]
     #[arg(long)]
     trace: bool,
 
@@ -160,12 +161,15 @@ pub fn main() -> Result<()> {
                 .log(!action.no_warn)
                 .error_to_raw(true)
                 .types(types);
-            if action.trace {
+            #[cfg(feature = "tracing")]
+            let save = if action.trace {
                 ser_hex::read("trace.json", &mut input, |reader| sr.read(reader))?
             } else {
                 sr.read(&mut input)?
-            }
-            .write(&mut output)?;
+            };
+            #[cfg(not(feature = "tracing"))]
+            let save = sr.read(&mut input)?;
+            save.write(&mut output)?;
 
             let (input, output) = (input.into_inner(), output.into_inner());
             if input != output {
