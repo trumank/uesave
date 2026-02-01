@@ -8,6 +8,7 @@ homepage.workspace = true
 description.workspace = true
 keywords.workspace = true
 license.workspace = true
+publish = false
 
 [lib]
 crate-type = ["cdylib", "rlib"]
