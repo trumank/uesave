@@ -12,7 +12,7 @@ const rootDir = join(webDir, "..");
 function getRustLicenses() {
   try {
     const output = execSync(
-      `cargo about generate --manifest-path uesave-wasm/Cargo.toml --format json`,
+      `cargo about generate --manifest-path uesave_wasm/Cargo.toml --format json`,
       { cwd: rootDir, encoding: "utf-8", maxBuffer: 10 * 1024 * 1024 }
     );
     const data = JSON.parse(output);
