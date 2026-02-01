@@ -1,5 +1,5 @@
 [package]
-name = "uesave-wasm"
+name = "uesave_wasm"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true

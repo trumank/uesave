@@ -578,16 +578,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "uesave-wasm"
-version = "0.6.2"
-dependencies = [
- "console_error_panic_hook",
- "serde_json",
- "uesave",
- "wasm-bindgen",
-]
-
-[[package]]
 name = "uesave_cli"
 version = "0.6.2"
 dependencies = [
@@ -598,6 +588,16 @@ dependencies = [
  "serde_json",
  "tempfile",
  "uesave",
+]
+
+[[package]]
+name = "uesave_wasm"
+version = "0.6.2"
+dependencies = [
+ "console_error_panic_hook",
+ "serde_json",
+ "uesave",
+ "wasm-bindgen",
 ]
 
 [[package]]

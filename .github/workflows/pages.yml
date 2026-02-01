@@ -28,7 +28,7 @@ jobs:
 
       - name: Build WASM
         run: wasm-pack build --target web --out-dir ../web/src/wasm
-        working-directory: uesave-wasm
+        working-directory: uesave_wasm
 
       - name: Setup Node
         uses: actions/setup-node@v4
