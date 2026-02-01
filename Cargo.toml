@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["uesave", "uesave_cli"]
+members = ["uesave", "uesave_cli", "uesave-wasm"]
 
 [workspace.package]
 version = "0.6.2"
