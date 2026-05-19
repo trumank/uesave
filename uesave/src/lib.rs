@@ -4650,14 +4650,7 @@ impl<T: ArchiveType> Property<T> {
             PropertyTagDataFull::Struct { struct_type, .. } => {
                 Property::Struct(StructValue::read(ar, struct_type)?)
             }
-            PropertyTagDataFull::Byte(ref enum_type) => {
-                let value = if enum_type.is_none() {
-                    Byte::Byte(ar.read_u8()?)
-                } else {
-                    Byte::Label(ar.read_string()?)
-                };
-                Property::Byte(value)
-            }
+            PropertyTagDataFull::Byte(_) => Property::Byte(Byte::Label(read_string(ar)?)),
             PropertyTagDataFull::Enum(_, _) => Property::Enum(ar.read_string()?),
             PropertyTagDataFull::Bool(_) => Property::Bool(ar.read_u8()? > 0),
             PropertyTagDataFull::Other(property_type) => match property_type {
