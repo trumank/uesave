@@ -783,6 +783,40 @@ fn test_palworld_lamp_is_manually_turned_off() -> Result<()> {
     Ok(())
 }
 
+/// Level pickups now serialize the full `PalMapObjectPickableItemModelBase`:
+/// `auto_picked_up` followed by the pickup guard's player uid and timer handle.
+#[test]
+fn test_palworld_pickup_item_on_level_post_update_pickup_guard() -> Result<()> {
+    // Verbatim PickupItem_Log ConcreteModel from a live post-update save.
+    let payload = unhex("f799612b0992dd46abbe8ee595702fa1031fa159a355854dab1c40747256009300000000000000000000000000000000000000000000000000000000");
+
+    let pickup = match parse_concrete_model(&payload, "PickupItem_Log")? {
+        games::palworld::PalMapConcreteModelVariant::PickupItemOnLevel(pickup) => pickup,
+        other => panic!("expected PickupItemOnLevel, got {other:?}"),
+    };
+
+    assert_eq!(0, pickup.auto_picked_up);
+    let guard = pickup.pickup_guard.as_ref().expect("post-update pickup");
+    assert_eq!(crate::FGuid::default(), guard.pickupable_player_uid);
+    assert_eq!(0, guard.remove_pickup_guard_timer_handle);
+    Ok(())
+}
+
+/// Pre-update level pickups end at `auto_picked_up`; the guard is absent and
+/// must not be written back.
+#[test]
+fn test_palworld_pickup_item_on_level_pre_update_blob_roundtrips() -> Result<()> {
+    let payload = unhex("ad698c406b298d49a13dea49625ea1ab03e797c2733de14cb046694b0a52962b00000000");
+
+    let pickup = match parse_concrete_model(&payload, "PickupItem_Stone")? {
+        games::palworld::PalMapConcreteModelVariant::PickupItemOnLevel(pickup) => pickup,
+        other => panic!("expected PickupItemOnLevel, got {other:?}"),
+    };
+
+    assert!(pickup.pickup_guard.is_none());
+    Ok(())
+}
+
 /// Parses a ConcreteModel module payload, asserting full consumption and a
 /// byte-exact rewrite, and returns the module data.
 fn parse_module(

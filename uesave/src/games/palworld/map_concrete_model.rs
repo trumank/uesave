@@ -272,18 +272,50 @@ impl PalMapObjectConvertItemModel {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PalPickupGuard {
+    pub pickupable_player_uid: FGuid,
+    pub remove_pickup_guard_timer_handle: i64,
+}
+
+impl PalPickupGuard {
+    pub fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
+        Ok(PalPickupGuard {
+            pickupable_player_uid: FGuid::read(ar)?,
+            remove_pickup_guard_timer_handle: ar.read_i64::<LE>()?,
+        })
+    }
+    pub fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
+        self.pickupable_player_uid.write(ar)?;
+        ar.write_i64::<LE>(self.remove_pickup_guard_timer_handle)?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PalMapObjectPickupItemOnLevelModel {
     pub auto_picked_up: u32,
+    /// Absent in saves written before the pickup guard joined the serialized base.
+    pub pickup_guard: Option<PalPickupGuard>,
 }
 
 impl PalMapObjectPickupItemOnLevelModel {
     pub fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
+        let auto_picked_up = ar.read_u32::<LE>()?;
+        let pickup_guard = if bytes_remaining(ar)? > 0 {
+            Some(PalPickupGuard::read(ar)?)
+        } else {
+            None
+        };
         Ok(PalMapObjectPickupItemOnLevelModel {
-            auto_picked_up: ar.read_u32::<LE>()?,
+            auto_picked_up,
+            pickup_guard,
         })
     }
     pub fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
         ar.write_u32::<LE>(self.auto_picked_up)?;
+        if let Some(pickup_guard) = &self.pickup_guard {
+            pickup_guard.write(ar)?;
+        }
         Ok(())
     }
 }
