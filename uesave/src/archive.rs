@@ -72,6 +72,12 @@ pub trait ArchiveReader: Read + Seek {
     fn error_to_raw(&self) -> bool {
         false
     }
+
+    /// Prevent reads from crossing the given absolute stream position.
+    fn push_read_limit(&mut self, _end: u64) {}
+
+    /// Remove the most recent read limit.
+    fn pop_read_limit(&mut self) {}
 }
 
 pub trait ArchiveWriter: Write + Seek {
@@ -177,6 +183,14 @@ where
 
     fn error_to_raw(&self) -> bool {
         SaveGameArchive::error_to_raw(self)
+    }
+
+    fn push_read_limit(&mut self, end: u64) {
+        SaveGameArchive::push_read_limit(self, end);
+    }
+
+    fn pop_read_limit(&mut self) {
+        SaveGameArchive::pop_read_limit(self);
     }
 }
 impl<W> ArchiveWriter for SaveGameArchive<W>

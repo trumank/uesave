@@ -231,6 +231,48 @@ fn test_read_array_property() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn test_error_to_raw_recovers_bounded_property_and_continues() -> Result<()> {
+    let mut bytes = vec![];
+
+    run(&mut Cursor::new(&mut bytes), |writer| {
+        PropertyTagFull {
+            name: "BadStruct".into(),
+            id: None,
+            size: 4,
+            index: 0,
+            data: PropertyTagDataFull::Struct {
+                struct_type: StructType::Guid,
+                id: Default::default(),
+            },
+        }
+        .write(writer)?;
+        writer.write_all(&[1, 2, 3, 4])?;
+
+        PropertyTagFull {
+            name: "AfterBadStruct".into(),
+            id: None,
+            size: 4,
+            index: 0,
+            data: PropertyTagDataFull::Other(PropertyType::IntProperty),
+        }
+        .write(writer)?;
+        writer.write_i32::<LE>(42)?;
+        writer.write_string("None")?;
+        Ok(())
+    })?;
+
+    let mut reader = Cursor::new(bytes);
+    let properties = run(&mut reader, |reader| {
+        reader.error_to_raw = true;
+        read_properties_until_none(reader)
+    })?;
+
+    assert_eq!(properties["BadStruct"], Property::Raw(vec![1, 2, 3, 4]));
+    assert_eq!(properties["AfterBadStruct"], Property::Int(42));
+    Ok(())
+}
+
 fn rw_property(original: &[u8]) -> Result<()> {
     let mut reader = Cursor::new(&original);
     let (property, schemas) = run(&mut reader, |reader| {

@@ -70,9 +70,6 @@ impl<R: Read> SeekReader<R> {
             reached_eof: false,
         }
     }
-    fn position(&self) -> usize {
-        self.position
-    }
     fn ensure_buffered(&mut self, min_bytes: usize) -> std::io::Result<()> {
         if self.reached_eof {
             return Ok(());
@@ -3132,15 +3129,6 @@ impl SoftObjectPath {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SoftClassPath(pub SoftObjectPath);
-impl SoftClassPath {
-    #[cfg_attr(feature = "tracing", instrument(name = "SoftClassPath_read", skip_all))]
-    fn read<A: ArchiveReader>(ar: &mut A) -> Result<Self> {
-        Ok(Self(SoftObjectPath::read(ar)?))
-    }
-    fn write<A: ArchiveWriter>(&self, ar: &mut A) -> Result<()> {
-        self.0.write(ar)
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GameplayTag {
@@ -4494,27 +4482,35 @@ impl<T: ArchiveType> Property<T> {
         }
         // Save the current position before attempting to parse
         let start_position = ar.stream_position()?;
+        let end_position = start_position + tag.size as u64;
 
         // Try to parse the property directly from the stream
-        let (inner, updated_tag_data) = match Self::try_read_inner(ar, &tag) {
-            Ok(result) => result,
-            Err(e) => {
-                // Check if we should convert errors to raw properties
-                if ar.error_to_raw() {
-                    // Parsing failed, seek back to start and read raw data
-                    if ar.log() {
-                        eprintln!("Warning: Failed to parse property '{}': {}", ar.path(), e);
+        let (inner, updated_tag_data) = {
+            ar.push_read_limit(end_position);
+            let result = match Self::try_read_inner(ar, &tag) {
+                Ok(result) => result,
+                Err(e) => {
+                    // Check if we should convert errors to raw properties
+                    if ar.error_to_raw() {
+                        // Parsing failed, seek back to start and read raw data
+                        if ar.log() {
+                            eprintln!("Warning: Failed to parse property '{}': {}", ar.path(), e);
+                        }
+                        ar.seek(std::io::SeekFrom::Start(start_position))?;
+                        let mut property_data = vec![0u8; tag.size as usize];
+                        ar.read_exact(&mut property_data)?;
+                        (Property::Raw(property_data), None)
+                    } else {
+                        ar.pop_read_limit();
+                        // Error mode: return the error immediately
+                        return Err(e);
                     }
-                    ar.seek(std::io::SeekFrom::Start(start_position))?;
-                    let mut property_data = vec![0u8; tag.size as usize];
-                    ar.read_exact(&mut property_data)?;
-                    (Property::Raw(property_data), None)
-                } else {
-                    // Error mode: return the error immediately
-                    return Err(e);
                 }
-            }
+            };
+            ar.pop_read_limit();
+            result
         };
+        ar.seek(std::io::SeekFrom::Start(end_position))?;
 
         Ok((inner, updated_tag_data))
     }
@@ -4969,6 +4965,7 @@ impl Save {
             log: false,
             error_to_raw: true,
             schemas,
+            read_limits: vec![],
         };
 
         self.header.write(&mut archive_writer)?;
@@ -5004,12 +5001,12 @@ impl SaveReader {
     }
     /// Configure whether parsing errors should produce Raw properties (true) or fail immediately (false).
     ///
-    /// When set to `true` (default), if a property cannot be parsed, it will be stored as a
+    /// When set to `true`, if a property cannot be parsed, it will be stored as a
     /// `Property::Raw` containing the raw bytes. This allows partial parsing of save files
     /// with unknown or corrupted properties.
     ///
-    /// When set to `false`, parsing errors will immediately return an error, allowing you to
-    /// detect and handle parsing issues explicitly.
+    /// When set to `false` (default), parsing errors will immediately return an error,
+    /// allowing you to detect and handle parsing issues explicitly.
     pub fn error_to_raw(mut self, error_to_raw: bool) -> Self {
         self.error_to_raw = error_to_raw;
         self
@@ -5031,6 +5028,7 @@ impl SaveReader {
             log: self.log,
             error_to_raw: self.error_to_raw,
             schemas: schemas.clone(),
+            read_limits: vec![],
         };
 
         let result = || -> Result<_> {

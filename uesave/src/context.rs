@@ -90,10 +90,21 @@ pub struct SaveGameArchive<S> {
     pub(crate) log: bool,
     pub(crate) error_to_raw: bool,
     pub(crate) schemas: Rc<RefCell<PropertySchemas>>,
+    pub(crate) read_limits: Vec<u64>,
 }
-impl<R: Read> Read for SaveGameArchive<R> {
+impl<R: Read + Seek> Read for SaveGameArchive<R> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        self.stream.read(buf)
+        if let Some(limit) = self.read_limits.last().copied() {
+            let position = self.stream.stream_position()?;
+            let remaining = limit.saturating_sub(position);
+            if remaining == 0 || buf.is_empty() {
+                return Ok(0);
+            }
+            let max_read = remaining.min(buf.len() as u64) as usize;
+            self.stream.read(&mut buf[..max_read])
+        } else {
+            self.stream.read(buf)
+        }
     }
 }
 impl<S: Seek> Seek for SaveGameArchive<S> {
@@ -123,8 +134,10 @@ impl<S> SaveGameArchive<S> {
             log: false,
             error_to_raw: false,
             schemas: Rc::new(RefCell::new(PropertySchemas::new())),
+            read_limits: vec![],
         }
     }
+    #[cfg(test)]
     pub(crate) fn run<F, T>(stream: S, f: F) -> T
     where
         F: FnOnce(&mut SaveGameArchive<S>) -> T,
@@ -148,6 +161,12 @@ impl<S> SaveGameArchive<S> {
     }
     pub(crate) fn error_to_raw(&self) -> bool {
         self.error_to_raw
+    }
+    pub(crate) fn push_read_limit(&mut self, end: u64) {
+        self.read_limits.push(end);
+    }
+    pub(crate) fn pop_read_limit(&mut self) {
+        self.read_limits.pop();
     }
 }
 impl<R: Read + Seek> SaveGameArchive<R> {
