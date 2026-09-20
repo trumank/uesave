@@ -75,9 +75,9 @@ impl CompressionHeader {
         let mut save_type_offset = 11;
         let mut data_offset = 12;
 
-        // Match the Python reference `_parse_sav_header`: a CNK file is keyed on the
-        // OUTER magic at [8:11]. When present, the real header is the NESTED inner one,
-        // and the magic/save_type used downstream become the inner values.
+        // A CNK file is keyed on the OUTER magic at [8:11]. When present, the real
+        // header is the NESTED inner one, and the magic/save_type used downstream
+        // become the inner values.
         if bytes_read >= 24 && &header_buf[8..11] == b"CNK" {
             uncompressed_len = u32::from_le_bytes([
                 header_buf[12],
@@ -150,8 +150,7 @@ fn zlib_deflate(data: &[u8]) -> Result<Vec<u8>> {
 }
 
 /// Zlib decompress for PLZ (double-zlib, save_type 0x32) and CNK (nested; the inner
-/// save_type decides single vs. double inflate). Mirrors `Zlib.decompress` in the
-/// Python `palworld_save_tools` reference.
+/// save_type decides single vs. double inflate).
 fn decompress_zlib(header: &CompressionHeader, data: &[u8]) -> Result<Vec<u8>> {
     let first = zlib_inflate(&data[header.data_offset..])?;
 

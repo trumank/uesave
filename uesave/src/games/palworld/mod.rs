@@ -571,7 +571,7 @@ mod skip_list_parity_tests {
     ];
 
     #[test]
-    fn test_no_typed_codec_under_python_skip_list() {
+    fn test_no_typed_codec_under_skip_list() {
         let types = palworld_types();
         for skip_path in SKIP_LIST {
             for suffix in ["", ".RawData", ".Value.RawData"] {
@@ -579,7 +579,7 @@ mod skip_list_parity_tests {
                 if let Some(struct_type) = types.get(&candidate) {
                     assert!(
                         !is_pal_struct_type(struct_type),
-                        "typed Palworld codec registered under Python skip-listed path: {candidate}"
+                        "typed Palworld codec registered under skip-listed path: {candidate}"
                     );
                 }
             }
