@@ -32,6 +32,11 @@ Options:
 ```
 ![edit](https://user-images.githubusercontent.com/1144160/210157064-234da188-ad20-416f-9ea5-7d2956168a20.svg)
 
+## Features
+
+- `gvas-json` — read the GVAS JSON dialect into uesave's property tree.
+  See `src/compat/gvas_json.rs`.
+
 ## Alternative projects
 in no particular order:
 - https://github.com/rob0rt/drg-save-parser

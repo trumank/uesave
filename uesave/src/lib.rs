@@ -33,6 +33,7 @@ mod error;
 mod game;
 pub mod games;
 mod serialization;
+pub mod compat;
 
 #[cfg(test)]
 mod tests;

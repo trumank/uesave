@@ -53,6 +53,30 @@ pub trait Game: Clone + PartialEq + std::fmt::Debug + Default + Serialize + 'sta
     where
         D: Deserializer<'de>;
 
+    /// Build a game struct from a GVAS-JSON-dialect decoded `RawData` object,
+    /// keyed by the property path that produced it.
+    ///
+    /// Default: `Ok(None)`, meaning this path carries no game struct and the
+    /// caller should keep the payload as opaque bytes.
+    #[cfg(feature = "gvas-json")]
+    fn game_struct_from_gvas_json(
+        _path: &str,
+        _value: &serde_json::Value,
+    ) -> Result<Option<Self::Struct<SaveGameArchiveType<Self>>>> {
+        Ok(None)
+    }
+
+    /// Re-encode a GVAS-JSON-dialect decoded `RawData` object back to bytes, for
+    /// a path that stays opaque bytes rather than becoming a game struct but that
+    /// the dialect may still ship decoded.
+    ///
+    /// Default: `Ok(None)`, meaning this path carries no such byte payload and
+    /// the caller should treat the decoded value as an error.
+    #[cfg(feature = "gvas-json")]
+    fn game_bytes_from_gvas_json(_path: &str, _value: &serde_json::Value) -> Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
+
     /// Post-process a freshly read property (embedded-bytes → typed value).
     fn process_property_for_read<R: Read + std::io::Seek>(
         _ar: &mut SaveGameArchive<R, Self>,

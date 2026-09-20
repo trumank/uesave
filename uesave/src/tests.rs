@@ -1759,3 +1759,300 @@ fn test_palworld_facade_json_roundtrip() -> Result<()> {
     );
     Ok(())
 }
+
+#[cfg(feature = "gvas-json")]
+#[test]
+fn test_gvas_json_error_carries_the_property_path() {
+    let err = Error::GvasJson {
+        path: "worldSaveData.MapObjectSaveData".to_string(),
+        message: "unknown property type: WidgetProperty".to_string(),
+    };
+    assert_eq!(
+        err.to_string(),
+        "gvas json at worldSaveData.MapObjectSaveData: unknown property type: WidgetProperty"
+    );
+}
+
+#[cfg(feature = "gvas-json")]
+mod gvas_json_tests {
+    use crate::compat::gvas_json::property_from_json;
+    use crate::games::palworld::Palworld;
+    use crate::*;
+    use pretty_assertions::assert_eq;
+
+    fn prop(json: &str) -> Property<SaveGameArchiveType<Palworld>> {
+        let value: serde_json::Value = serde_json::from_str(json).expect("valid json");
+        property_from_json::<Palworld>(&value, "test").expect("converts")
+    }
+
+    #[test]
+    fn reads_scalar_properties() {
+        assert_eq!(prop(r#"{"type":"IntProperty","value":42,"id":null}"#), Property::Int(42));
+        assert_eq!(prop(r#"{"type":"BoolProperty","value":true,"id":null}"#), Property::Bool(true));
+        assert_eq!(
+            prop(r#"{"type":"NameProperty","value":"ItemChest_04","id":null}"#),
+            Property::Name("ItemChest_04".to_string())
+        );
+        assert_eq!(
+            prop(r#"{"type":"StrProperty","value":"Home","id":null}"#),
+            Property::Str("Home".to_string())
+        );
+        assert_eq!(
+            prop(r#"{"type":"Int64Property","value":8589934592,"id":null}"#),
+            Property::Int64(8589934592)
+        );
+        assert_eq!(
+            prop(r#"{"type":"FloatProperty","value":1.5,"id":null}"#),
+            Property::Float(Float(1.5))
+        );
+        assert_eq!(
+            prop(r#"{"type":"DoubleProperty","value":2.5,"id":null}"#),
+            Property::Double(Double(2.5))
+        );
+        assert_eq!(prop(r#"{"type":"Int8Property","value":-12,"id":null}"#), Property::Int8(-12));
+        assert_eq!(
+            prop(r#"{"type":"Int16Property","value":-1200,"id":null}"#),
+            Property::Int16(-1200)
+        );
+        assert_eq!(prop(r#"{"type":"UInt8Property","value":200,"id":null}"#), Property::UInt8(200));
+        // `RankUpExp` on `PalIndividualCharacterSaveParameter` is the real field a
+        // corpus sample surfaced this arm from.
+        assert_eq!(
+            prop(r#"{"type":"UInt16Property","value":999,"id":null}"#),
+            Property::UInt16(999)
+        );
+        assert_eq!(
+            prop(r#"{"type":"UInt32Property","value":4000000000,"id":null}"#),
+            Property::UInt32(4000000000)
+        );
+        assert_eq!(
+            prop(r#"{"type":"UInt64Property","value":18000000000000000000,"id":null}"#),
+            Property::UInt64(18000000000000000000)
+        );
+    }
+
+    #[test]
+    fn reads_a_plain_numeric_byte_property() {
+        assert_eq!(
+            prop(r#"{"type":"ByteProperty","id":null,"value":{"type":"None","value":7}}"#),
+            Property::Byte(Byte::Byte(7))
+        );
+    }
+
+    #[test]
+    fn reads_an_enum_backed_byte_property() {
+        assert_eq!(
+            prop(
+                r#"{"type":"ByteProperty","id":null,
+                    "value":{"type":"EPalGenderType","value":"EPalGenderType::Male"}}"#
+            ),
+            Property::Byte(Byte::Label("EPalGenderType::Male".to_string()))
+        );
+    }
+
+    /// The dialect nests the enum's own type alongside its value.
+    #[test]
+    fn reads_an_enum_property_from_its_nested_value() {
+        assert_eq!(
+            prop(r#"{"type":"EnumProperty","id":null,
+                     "value":{"type":"EPalWorkableType","value":"EPalWorkableType::MonsterFarm"}}"#),
+            Property::Enum("EPalWorkableType::MonsterFarm".to_string())
+        );
+    }
+
+    #[test]
+    fn an_unknown_property_type_names_its_path() {
+        let value: serde_json::Value =
+            serde_json::from_str(r#"{"type":"WidgetProperty","value":1}"#).unwrap();
+        let err = property_from_json::<Palworld>(&value, "worldSaveData.Thing").unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "gvas json at worldSaveData.Thing: unknown property type: WidgetProperty"
+        );
+    }
+
+    #[test]
+    fn reads_a_guid_struct() {
+        assert_eq!(
+            prop(r#"{"type":"StructProperty","struct_type":"Guid",
+                     "struct_id":"00000000-0000-0000-0000-000000000000","id":null,
+                     "value":"fac62390-ccce-4cc4-9ce6-3b2eb894b17c"}"#),
+            Property::Struct(StructValue::Guid(
+                FGuid::parse_str("fac62390-ccce-4cc4-9ce6-3b2eb894b17c").unwrap()
+            ))
+        );
+    }
+
+    #[test]
+    fn reads_a_named_struct_as_nested_properties() {
+        let value = prop(
+            r#"{"type":"StructProperty","struct_type":"PalItemContainerBelongInfo",
+                "struct_id":"00000000-0000-0000-0000-000000000000","id":null,
+                "value":{"bControllableOthers":{"type":"BoolProperty","value":false,"id":null}}}"#,
+        );
+        let Property::Struct(StructValue::Struct(props)) = value else {
+            panic!("expected a nested struct");
+        };
+        assert_eq!(props.0.get(&PropertyKey::from("bControllableOthers")), Some(&Property::Bool(false)));
+    }
+
+    /// Engine math structs write their fields as plain numbers, not nested
+    /// property objects like a user-defined struct does.
+    #[test]
+    fn reads_a_vector_struct_from_plain_numbers() {
+        assert_eq!(
+            prop(
+                r#"{"type":"StructProperty","struct_type":"Vector",
+                    "struct_id":"00000000-0000-0000-0000-000000000000","id":null,
+                    "value":{"x":1.0,"y":2.0,"z":3.0}}"#
+            ),
+            Property::Struct(StructValue::Vector(Vector { x: Double(1.0), y: Double(2.0), z: Double(3.0) }))
+        );
+    }
+
+    #[test]
+    fn reads_a_vector2d_struct_from_plain_numbers() {
+        assert_eq!(
+            prop(
+                r#"{"type":"StructProperty","struct_type":"Vector2D",
+                    "struct_id":"00000000-0000-0000-0000-000000000000","id":null,
+                    "value":{"x":4.0,"y":5.0}}"#
+            ),
+            Property::Struct(StructValue::Vector2D(Vector2D { x: Double(4.0), y: Double(5.0) }))
+        );
+    }
+
+    #[test]
+    fn reads_a_rotator_struct_from_plain_numbers() {
+        assert_eq!(
+            prop(
+                r#"{"type":"StructProperty","struct_type":"Rotator",
+                    "struct_id":"00000000-0000-0000-0000-000000000000","id":null,
+                    "value":{"x":10.0,"y":20.0,"z":30.0}}"#
+            ),
+            Property::Struct(StructValue::Rotator(Rotator { x: Double(10.0), y: Double(20.0), z: Double(30.0) }))
+        );
+    }
+
+    #[test]
+    fn reads_a_quat_struct_from_plain_numbers() {
+        assert_eq!(
+            prop(
+                r#"{"type":"StructProperty","struct_type":"Quat",
+                    "struct_id":"00000000-0000-0000-0000-000000000000","id":null,
+                    "value":{"x":0.0,"y":0.0,"z":0.0,"w":1.0}}"#
+            ),
+            Property::Struct(StructValue::Quat(Quat {
+                x: Double(0.0),
+                y: Double(0.0),
+                z: Double(0.0),
+                w: Double(1.0)
+            }))
+        );
+    }
+
+    #[test]
+    fn reads_an_opaque_byte_array() {
+        assert_eq!(
+            prop(r#"{"type":"ArrayProperty","array_type":"ByteProperty","id":null,
+                     "value":{"values":[1,0,0,0]}}"#),
+            Property::Array(ValueVec::Byte(ByteArray::Byte(vec![1, 0, 0, 0])))
+        );
+    }
+
+    #[test]
+    fn reads_a_struct_array_from_its_values() {
+        let value = prop(
+            r#"{"type":"ArrayProperty","array_type":"StructProperty","id":null,
+                "value":{"prop_name":"Slots","prop_type":"StructProperty",
+                         "type_name":"PalCharacterSlotSaveData",
+                         "id":"00000000-0000-0000-0000-000000000000",
+                         "values":[{"SlotIndex":{"type":"IntProperty","value":3,"id":null}}]}}"#,
+        );
+        let Property::Array(ValueVec::Struct(items)) = value else { panic!("expected a struct array") };
+        assert_eq!(items.len(), 1);
+        let StructValue::Struct(props) = &items[0] else { panic!("expected a struct element") };
+        assert_eq!(props.0.get(&PropertyKey::from("SlotIndex")), Some(&Property::Int(3)));
+    }
+
+    /// A `Guid`-typed struct array (e.g. `OldOwnerPlayerUIds`) carries bare uuid
+    /// strings rather than nested property objects.
+    #[test]
+    fn reads_a_guid_typed_struct_array_from_bare_uuids() {
+        let value = prop(
+            r#"{"type":"ArrayProperty","array_type":"StructProperty","id":null,
+                "value":{"prop_name":"OldOwnerPlayerUIds","prop_type":"StructProperty",
+                         "type_name":"Guid","id":"00000000-0000-0000-0000-000000000000",
+                         "values":["fac62390-ccce-4cc4-9ce6-3b2eb894b17c"]}}"#,
+        );
+        let Property::Array(ValueVec::Struct(items)) = value else { panic!("expected a struct array") };
+        assert_eq!(
+            items,
+            vec![StructValue::Guid(FGuid::parse_str("fac62390-ccce-4cc4-9ce6-3b2eb894b17c").unwrap())]
+        );
+    }
+
+    #[test]
+    fn reads_a_name_array_from_its_values() {
+        assert_eq!(
+            prop(
+                r#"{"type":"ArrayProperty","array_type":"NameProperty","id":null,
+                    "value":{"values":["Foo","Bar"]}}"#
+            ),
+            Property::Array(ValueVec::Name(vec!["Foo".to_string(), "Bar".to_string()]))
+        );
+    }
+
+    #[test]
+    fn reads_an_enum_array_from_its_values() {
+        assert_eq!(
+            prop(
+                r#"{"type":"ArrayProperty","array_type":"EnumProperty","id":null,
+                    "value":{"values":["EPalWorkableType::MonsterFarm","EPalWorkableType::Handiwork"]}}"#
+            ),
+            Property::Array(ValueVec::Enum(vec![
+                "EPalWorkableType::MonsterFarm".to_string(),
+                "EPalWorkableType::Handiwork".to_string()
+            ]))
+        );
+    }
+
+    #[test]
+    fn reads_an_enum_keyed_map() {
+        let value = prop(
+            r#"{"type":"MapProperty","key_type":"EnumProperty","value_type":"StructProperty",
+                "id":null,
+                "value":[{"key":"EPalMapObjectConcreteModelModuleType::ItemContainer",
+                          "value":{"SlotNum":{"type":"IntProperty","value":7,"id":null}}}]}"#,
+        );
+        let Property::Map(entries) = value else { panic!("expected a map") };
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].key,
+            Property::Enum("EPalMapObjectConcreteModelModuleType::ItemContainer".to_string())
+        );
+        let Property::Struct(StructValue::Struct(props)) = &entries[0].value else {
+            panic!("expected a struct value");
+        };
+        assert_eq!(props.0.get(&PropertyKey::from("SlotNum")), Some(&Property::Int(7)));
+    }
+
+    #[test]
+    fn reads_an_int_keyed_map() {
+        let value = prop(
+            r#"{"type":"MapProperty","key_type":"IntProperty","value_type":"StructProperty",
+                "id":null,"value":[{"key":0,"value":{}}]}"#,
+        );
+        let Property::Map(entries) = value else { panic!("expected a map") };
+        assert_eq!(entries[0].key, Property::Int(0));
+    }
+
+    #[test]
+    fn an_empty_map_reads_as_no_entries() {
+        let value = prop(
+            r#"{"type":"MapProperty","key_type":"IntProperty","value_type":"StructProperty",
+                "id":null,"value":[]}"#,
+        );
+        assert_eq!(value, Property::Map(vec![]));
+    }
+}

@@ -14,6 +14,7 @@ default = []
 tracing = ["dep:tracing"]
 oodle = ["dep:ooz-rs"]
 cli = ["dep:serde_json"]
+gvas-json = ["dep:serde_json"]
 
 [dependencies]
 byteorder = "1.5.0"
