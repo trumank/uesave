@@ -30,7 +30,10 @@ match save.root.properties["NumberOfGamesPlayed"] {
 mod archive;
 mod context;
 mod error;
+mod game;
+pub mod games;
 mod serialization;
+pub mod compat;
 
 #[cfg(test)]
 mod tests;
@@ -38,6 +41,7 @@ mod tests;
 pub use archive::{ArchiveReader, ArchiveType, ArchiveWriter, SaveGameArchiveType};
 pub use context::{PropertySchemas, SaveGameArchive, Scope, Types};
 pub use error::{Error, ParseError};
+pub use game::{Game, GameStruct, NoGame};
 
 use byteorder::{ReadBytesExt, WriteBytesExt, LE};
 use std::{
@@ -212,7 +216,18 @@ pub fn read_string<A: ArchiveReader>(ar: &mut A) -> Result<String> {
     if len < 0 {
         let chars = read_array((-len) as u32, ar, |r| Ok(r.read_u16::<LE>()?))?;
         let length = chars.iter().position(|&c| c == 0).unwrap_or(chars.len());
-        Ok(String::from_utf16(&chars[..length]).unwrap())
+        Ok(match String::from_utf16(&chars[..length]) {
+            Ok(s) => s,
+            Err(_) => {
+                if ar.log() {
+                    eprintln!(
+                        "Warning: UTF-16 decoding error at '{}', using lossy conversion. Data loss may occur.",
+                        ar.path()
+                    );
+                }
+                String::from_utf16_lossy(&chars[..length])
+            }
+        })
     } else {
         let mut chars = vec![0; len as usize];
         ar.read_exact(&mut chars)?;
@@ -252,7 +267,19 @@ fn read_string_trailing<A: ArchiveReader>(ar: &mut A) -> Result<(String, Vec<u8>
             rest.push(ar.read_u8()?);
             read += 1;
         }
-        Ok((String::from_utf16(&chars).unwrap(), rest))
+        let string = match String::from_utf16(&chars) {
+            Ok(s) => s,
+            Err(_) => {
+                if ar.log() {
+                    eprintln!(
+                        "Warning: UTF-16 decoding error in trailing string at '{}', using lossy conversion. Data loss may occur.",
+                        ar.path()
+                    );
+                }
+                String::from_utf16_lossy(&chars)
+            }
+        };
+        Ok((string, rest))
     } else {
         let bytes = len as usize;
         let mut chars = vec![];
@@ -272,7 +299,19 @@ fn read_string_trailing<A: ArchiveReader>(ar: &mut A) -> Result<(String, Vec<u8>
             rest.push(ar.read_u8()?);
             read += 1;
         }
-        Ok((String::from_utf8(chars).unwrap(), rest))
+        let string = match String::from_utf8(chars) {
+            Ok(s) => s,
+            Err(e) => {
+                if ar.log() {
+                    eprintln!(
+                        "Warning: UTF-8 decoding error in trailing string at '{}', using lossy conversion. Data loss may occur.",
+                        ar.path()
+                    );
+                }
+                String::from_utf8_lossy(&e.into_bytes()).into_owned()
+            }
+        };
+        Ok((string, rest))
     }
 }
 #[cfg_attr(feature = "tracing", instrument(skip_all))]
@@ -422,12 +461,18 @@ fn read_property<T: ArchiveType, A: ArchiveReader<ArchiveType = T>>(
 
         let key = PropertyKey(tag.index, tag_name.clone());
 
-        // Record the final, complete schema
+        // Post-process (may convert game-specific embedded data and refine the
+        // tag further) and record the final, complete schema
         ar.scope().push(&tag_name);
-        ar.record_schema(ar.path().to_string(), tag.into_partial());
+        let result = (|ar: &mut A| -> Result<Property<T>> {
+            let mut partial = tag.into_partial();
+            let value = ar.post_process_property(&mut partial, value)?;
+            ar.record_schema(ar.path().to_string(), partial);
+            Ok(value)
+        })(ar);
         ar.scope().pop();
 
-        Ok(Some((key, value)))
+        Ok(Some((key, result?)))
     } else {
         Ok(None)
     }
@@ -443,7 +488,15 @@ fn write_property<T: ArchiveType, A: ArchiveWriter<ArchiveType = T>>(
             .get_schema(&ar.path())
             .ok_or_else(|| Error::MissingPropertySchema(ar.path()))?;
 
-        let mut tag = tag_partial.into_full(&prop.0 .1, 0, prop.0 .0, prop.1);
+        // Pre-process (may convert game-specific typed values back into their
+        // embedded representation, replacing both tag and value)
+        let (tag_partial, converted) = match ar.pre_write_property(prop.0, &tag_partial, prop.1)? {
+            Some((tag_partial, converted)) => (tag_partial, Some(converted)),
+            None => (tag_partial, None),
+        };
+        let value = converted.as_ref().unwrap_or(prop.1);
+
+        let mut tag = tag_partial.into_full(&prop.0 .1, 0, prop.0 .0, value);
 
         // Write tag with placeholder size
         tag.size = 0;
@@ -452,7 +505,7 @@ fn write_property<T: ArchiveType, A: ArchiveWriter<ArchiveType = T>>(
         let data_start = ar.stream_position()?;
 
         // Write the actual property data
-        prop.1.write(ar, &tag)?;
+        value.write(ar, &tag)?;
         let data_end = ar.stream_position()?;
 
         // Calculate actual size
@@ -471,12 +524,45 @@ fn write_property<T: ArchiveType, A: ArchiveWriter<ArchiveType = T>>(
     result
 }
 
+/// Upper bound on capacity pre-reserved from a length read out of the stream.
+/// A corrupt or speculatively-misread count must not reach `Vec::with_capacity`
+/// unchecked: on 32-bit targets (wasm32) a capacity past `isize::MAX` (~2 GB) is
+/// an uncatchable `capacity overflow` panic rather than a recoverable error. The
+/// vec still grows as elements are read, so a garbage length now fails with a
+/// read error instead of aborting the whole parse.
+pub(crate) const UNTRUSTED_PREALLOC_CAP: usize = 4096;
+
+pub(crate) fn bounded_prealloc(count: usize) -> usize {
+    count.min(UNTRUSTED_PREALLOC_CAP)
+}
+
+#[cfg(test)]
+mod bounded_prealloc_tests {
+    use super::{bounded_prealloc, UNTRUSTED_PREALLOC_CAP};
+
+    #[test]
+    fn caps_untrusted_length_but_keeps_small_ones() {
+        assert_eq!(bounded_prealloc(0), 0);
+        assert_eq!(bounded_prealloc(10), 10);
+        assert_eq!(
+            bounded_prealloc(UNTRUSTED_PREALLOC_CAP),
+            UNTRUSTED_PREALLOC_CAP
+        );
+        // A garbage count never reaches with_capacity unchecked.
+        assert_eq!(bounded_prealloc(u32::MAX as usize), UNTRUSTED_PREALLOC_CAP);
+    }
+}
+
 #[cfg_attr(feature = "tracing", instrument(skip_all))]
 fn read_array<T, F, A: ArchiveReader>(length: u32, ar: &mut A, f: F) -> Result<Vec<T>>
 where
     F: Fn(&mut A) -> Result<T>,
 {
-    (0..length).map(|_| f(ar)).collect()
+    let mut out = Vec::with_capacity(bounded_prealloc(length as usize));
+    for _ in 0..length {
+        out.push(f(ar)?);
+    }
+    Ok(out)
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -560,7 +646,7 @@ impl<'de> Deserialize<'de> for FGuid {
             where
                 E: serde::de::Error,
             {
-                FGuid::parse_str(value).map_err(|e| E::custom(format!("Invalid UUID: {}", e)))
+                FGuid::parse_str(value).map_err(|e| E::custom(format!("Invalid UUID: {e}")))
             }
         }
 
@@ -1018,7 +1104,17 @@ impl PropertyTagFull<'_> {
                 Ok(())
             }
             fn write_full_type<A: ArchiveWriter>(ar: &mut A, full_type: &str) -> Result<()> {
-                let (a, b) = full_type.split_once('.').unwrap(); // TODO
+                // `full_type` must be a `Package.Name` path here. `StructType::Game(name)`
+                // holds only a bare name (no dot) because game structs are embedded as
+                // byte arrays and never reach this struct-header write path directly (the
+                // write hook swaps the property tag to Array/Byte first) — guard against
+                // that invariant breaking instead of panicking.
+                let (a, b) = full_type.split_once('.').ok_or_else(|| {
+                    crate::Error::Other(format!(
+                        "write_full_type: expected a `Package.Name` path, got bare name {full_type:?} \
+                         (a StructType::Game value reached the struct-header write path unexpectedly)"
+                    ))
+                })?;
                 write_node(ar, b, 1)?;
                 write_node(ar, a, 0)?;
                 Ok(())
@@ -1207,11 +1303,79 @@ define_property_types! {
 
 macro_rules! define_struct_types {
     ($(($package:literal, $variant:ident)),* $(,)?) => {
-        #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+        #[derive(Debug, Clone, PartialEq, Eq)]
         pub enum StructType {
             $($variant,)*
+            /// A game-specific struct type (see [`Game`]). Holds the bare
+            /// `Xxx` type name; resolved against the active game's
+            /// [`Game::is_game_struct_type`] / [`Game::read_struct`].
+            Game(String),
             Raw(String),
             Struct(Option<String>),
+        }
+
+        // `StructType::Game(name)` serializes as the bare type-name string, so a
+        // former unit variant (`StructType::PalCharacterData` → `"PalCharacterData"`)
+        // and its `Game("PalCharacterData")` replacement produce identical JSON.
+        // `Raw`/`Struct` keep their externally-tagged map form; they are therefore
+        // never encoded as a bare string, so any bare string that is not a known
+        // core variant name deserializes back to `Game`.
+        impl Serialize for StructType {
+            fn serialize<S: serde::Serializer>(
+                &self,
+                serializer: S,
+            ) -> std::result::Result<S::Ok, S::Error> {
+                match self {
+                    $(StructType::$variant => serializer.serialize_str(stringify!($variant)),)*
+                    StructType::Game(name) => serializer.serialize_str(name),
+                    StructType::Raw(t) => {
+                        serializer.serialize_newtype_variant("StructType", 0, "Raw", t)
+                    }
+                    StructType::Struct(t) => {
+                        serializer.serialize_newtype_variant("StructType", 1, "Struct", t)
+                    }
+                }
+            }
+        }
+
+        impl<'de> Deserialize<'de> for StructType {
+            fn deserialize<D: Deserializer<'de>>(
+                deserializer: D,
+            ) -> std::result::Result<Self, D::Error> {
+                struct StructTypeVisitor;
+                impl<'de> serde::de::Visitor<'de> for StructTypeVisitor {
+                    type Value = StructType;
+                    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                        f.write_str("a struct type name string or a tagged Raw/Struct map")
+                    }
+                    fn visit_str<E: serde::de::Error>(
+                        self,
+                        v: &str,
+                    ) -> std::result::Result<StructType, E> {
+                        Ok(match v {
+                            $(stringify!($variant) => StructType::$variant,)*
+                            "Struct" => StructType::Struct(None),
+                            _ => StructType::Game(v.to_owned()),
+                        })
+                    }
+                    fn visit_map<A: serde::de::MapAccess<'de>>(
+                        self,
+                        mut map: A,
+                    ) -> std::result::Result<StructType, A::Error> {
+                        let key: String = map
+                            .next_key()?
+                            .ok_or_else(|| serde::de::Error::custom("empty StructType map"))?;
+                        match key.as_str() {
+                            "Raw" => Ok(StructType::Raw(map.next_value()?)),
+                            "Struct" => Ok(StructType::Struct(map.next_value()?)),
+                            other => Err(serde::de::Error::custom(format!(
+                                "unknown StructType variant {other:?}"
+                            ))),
+                        }
+                    }
+                }
+                deserializer.deserialize_any(StructTypeVisitor)
+            }
         }
 
         impl From<&str> for StructType {
@@ -1247,6 +1411,9 @@ macro_rules! define_struct_types {
             pub fn full_str(&self) -> &str {
                 match self {
                     $(StructType::$variant => concat!($package, ".", stringify!($variant)),)*
+                    // Game structs are embedded as byte arrays and never written
+                    // as struct headers, so this path holds only the bare name.
+                    StructType::Game(t) => t,
                     StructType::Raw(t) => t,
                     StructType::Struct(Some(t)) => t,
                     _ => unreachable!(),
@@ -1256,6 +1423,7 @@ macro_rules! define_struct_types {
             pub fn as_str(&self) -> &str {
                 match self {
                     $(StructType::$variant => stringify!($variant),)*
+                    StructType::Game(t) => t,
                     StructType::Raw(t) => t,
                     StructType::Struct(Some(t)) => t,
                     _ => unreachable!(),
@@ -2168,12 +2336,11 @@ impl FMovieSceneFloatChannel {
         let times_elem_size = ar.read_i32::<LE>()?;
         if times_elem_size != 4 {
             return Err(Error::Other(format!(
-                "FMovieSceneFloatChannel: unexpected Times element size {} (expected 4)",
-                times_elem_size
+                "FMovieSceneFloatChannel: unexpected Times element size {times_elem_size} (expected 4)"
             )));
         }
         let times_count = ar.read_i32::<LE>()? as usize;
-        let mut times = Vec::with_capacity(times_count);
+        let mut times = Vec::with_capacity(bounded_prealloc(times_count));
         for _ in 0..times_count {
             times.push(ar.read_i32::<LE>()?);
         }
@@ -2181,12 +2348,11 @@ impl FMovieSceneFloatChannel {
         let values_elem_size = ar.read_i32::<LE>()?;
         if values_elem_size != 28 {
             return Err(Error::Other(format!(
-                "FMovieSceneFloatChannel: unexpected Values element size {} (expected 28)",
-                values_elem_size
+                "FMovieSceneFloatChannel: unexpected Values element size {values_elem_size} (expected 28)"
             )));
         }
         let values_count = ar.read_i32::<LE>()? as usize;
-        let mut values = Vec::with_capacity(values_count);
+        let mut values = Vec::with_capacity(bounded_prealloc(values_count));
         for _ in 0..values_count {
             let value = ar.read_f32::<LE>()?.into();
             let arrive_tangent = ar.read_f32::<LE>()?.into();
@@ -3907,6 +4073,9 @@ pub enum StructValue<T: ArchiveType = SaveGameArchiveType> {
     NiagaraVariableWithOffset(FNiagaraVariableWithOffset<T>),
     NiagaraDataInterfaceGeneratedFunction(FNiagaraDataInterfaceGeneratedFunction),
     NiagaraDataInterfaceGPUParamInfo(FNiagaraDataInterfaceGPUParamInfo),
+    /// A game-specific struct value, owned by the active [`Game`] (see
+    /// [`GameStruct`]). Serializes untagged, i.e. as just its payload.
+    Game(<T::Game as Game>::Struct<T>),
     /// Raw struct data for other unknown structs serialized with HasBinaryOrNativeSerialize
     Raw(Vec<u8>),
     /// User defined struct which is simply a list of properties
@@ -4043,6 +4212,7 @@ impl<T: ArchiveType> StructValue<T> {
                     FNiagaraDataInterfaceGPUParamInfo::read(ar)?,
                 )
             }
+            StructType::Game(name) => StructValue::Game(<T::Game as Game>::read_struct(ar, name)?),
             StructType::Raw(_) => unreachable!("should be handled at property level"),
             StructType::Struct(_) => StructValue::Struct(read_properties_until_none(ar)?),
         })
@@ -4092,6 +4262,7 @@ impl<T: ArchiveType> StructValue<T> {
             StructValue::NiagaraVariableWithOffset(v) => v.write(ar)?,
             StructValue::NiagaraDataInterfaceGeneratedFunction(v) => v.write(ar)?,
             StructValue::NiagaraDataInterfaceGPUParamInfo(v) => v.write(ar)?,
+            StructValue::Game(v) => v.write(ar)?,
             StructValue::Raw(v) => ar.write_all(v)?,
             StructValue::Struct(v) => write_properties_none_terminated(ar, v)?,
         }
@@ -4732,9 +4903,8 @@ impl<T: ArchiveType> Property<T> {
             | Property::MulticastSparseDelegate(_)
             | Property::Raw(_) => {
                 return Err(Error::Other(format!(
-                    "Property variant {:?} cannot be written in value context (Maps/Sets/Arrays)",
-                    self
-                )))
+                "Property variant {self:?} cannot be written in value context (Maps/Sets/Arrays)"
+            )))
             }
         };
         Ok(())
@@ -4908,13 +5078,14 @@ impl Header {
 
 /// Root struct inside a save file which holds both the Unreal Engine class name and list of properties
 #[derive(Debug, PartialEq, Serialize)]
-pub struct Root {
+#[serde(bound(serialize = "T::ObjectRef: Serialize"))]
+pub struct Root<T: ArchiveType = SaveGameArchiveType> {
     pub save_game_type: String,
-    pub properties: Properties,
+    pub properties: Properties<T>,
 }
-impl Root {
+impl<T: ArchiveType> Root<T> {
     #[cfg_attr(feature = "tracing", instrument(name = "Root_read", skip_all))]
-    fn read<A: ArchiveReader<ArchiveType = SaveGameArchiveType>>(ar: &mut A) -> Result<Self> {
+    fn read<A: ArchiveReader<ArchiveType = T>>(ar: &mut A) -> Result<Self> {
         let save_game_type = ar.read_string()?;
         if ar.version().property_tag() {
             ar.read_u8()?;
@@ -4925,7 +5096,7 @@ impl Root {
             properties,
         })
     }
-    fn write<A: ArchiveWriter<ArchiveType = SaveGameArchiveType>>(&self, ar: &mut A) -> Result<()> {
+    fn write<A: ArchiveWriter<ArchiveType = T>>(&self, ar: &mut A) -> Result<()> {
         ar.write_string(&self.save_game_type)?;
         if ar.version().property_tag() {
             ar.write_u8(0)?;
@@ -4936,14 +5107,14 @@ impl Root {
 }
 
 #[derive(Debug, PartialEq, Serialize)]
-pub struct Save {
+pub struct Save<G: Game = NoGame> {
     pub header: Header,
     /// Property schemas (tags) separated from property data
     pub schemas: PropertySchemas,
-    pub root: Root,
+    pub root: Root<SaveGameArchiveType<G>>,
     pub extra: Vec<u8>,
 }
-impl Save {
+impl Save<NoGame> {
     /// Reads save from the given reader
     #[cfg_attr(feature = "tracing", instrument(name = "Root_read", skip_all))]
     pub fn read<R: Read>(reader: &mut R) -> Result<Self, ParseError> {
@@ -4957,6 +5128,8 @@ impl Save {
     pub fn read_with_types<R: Read>(reader: &mut R, types: Types) -> Result<Self, ParseError> {
         SaveReader::new().types(types).read(reader)
     }
+}
+impl<G: Game> Save<G> {
     pub fn write<W: Write>(&self, writer: &mut W) -> Result<()> {
         let mut buffer = vec![];
         let schemas = Rc::new(RefCell::new(self.schemas.clone()));
@@ -4969,6 +5142,7 @@ impl Save {
             log: false,
             error_to_raw: true,
             schemas,
+            _game: std::marker::PhantomData::<G>,
         };
 
         self.header.write(&mut archive_writer)?;
@@ -4978,26 +5152,43 @@ impl Save {
         writer.write_all(&buffer)?;
         Ok(())
     }
+    /// Writes the save through the game's canonical container format (see
+    /// [`Game::compress_save`]; e.g. Palworld's zlib-compressed PLZ format).
+    /// Games that support multiple container formats may expose additional
+    /// explicit helpers (e.g. `Save::<Palworld>::write_plm` for Oodle).
+    pub fn write_compressed<W: Write>(&self, writer: &mut W) -> Result<()> {
+        let mut buffer = Vec::new();
+        self.write(&mut buffer)?;
+
+        let output = G::compress_save(&buffer)?;
+
+        writer.write_all(&output)?;
+        Ok(())
+    }
 }
 
-pub struct SaveReader {
+pub struct SaveReader<G: Game = NoGame> {
     log: bool,
     error_to_raw: bool,
     types: Option<Rc<Types>>,
+    _game: std::marker::PhantomData<G>,
 }
-impl Default for SaveReader {
+impl Default for SaveReader<NoGame> {
     fn default() -> Self {
         Self::new()
     }
 }
-impl SaveReader {
+impl SaveReader<NoGame> {
     pub fn new() -> Self {
         Self {
             log: false,
             error_to_raw: false,
             types: None,
+            _game: std::marker::PhantomData,
         }
     }
+}
+impl<G: Game> SaveReader<G> {
     pub fn log(mut self, log: bool) -> Self {
         self.log = log;
         self
@@ -5018,12 +5209,26 @@ impl SaveReader {
         self.types = Some(Rc::new(types));
         self
     }
-    pub fn read<S: Read>(self, stream: S) -> Result<Save, ParseError> {
+    /// Rebuild this reader for a different game type, carrying over the
+    /// configured options.
+    pub fn game<G2: Game>(self) -> SaveReader<G2> {
+        SaveReader {
+            log: self.log,
+            error_to_raw: self.error_to_raw,
+            types: self.types,
+            _game: std::marker::PhantomData,
+        }
+    }
+    pub fn read<S: Read>(self, mut stream: S) -> Result<Save<G>, ParseError> {
         let types = self.types.unwrap_or_else(|| Rc::new(Types::new()));
         let schemas = Rc::new(RefCell::new(PropertySchemas::new()));
 
-        let stream = SeekReader::new(stream);
-        let mut reader = SaveGameArchive {
+        // Transparently decompress compressed save formats (e.g. Palworld PLM/PLZ).
+        // Plain GVAS data is passed through unchanged (the default `Game::decompress_save`).
+        let data = G::decompress_save(&mut stream)
+            .map_err(|error| error::ParseError { offset: 0, error })?;
+        let stream = SeekReader::new(Cursor::new(data));
+        let mut reader: SaveGameArchive<_, G> = SaveGameArchive {
             stream,
             version: None,
             types,
@@ -5031,6 +5236,7 @@ impl SaveReader {
             log: self.log,
             error_to_raw: self.error_to_raw,
             schemas: schemas.clone(),
+            _game: std::marker::PhantomData,
         };
 
         let result = || -> Result<_> {

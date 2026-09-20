@@ -4,7 +4,8 @@ use std::io::{stdin, stdout, BufRead, BufReader, BufWriter, Cursor, Write};
 use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
 
-use uesave::{Save, SaveReader, StructType, Types};
+use uesave::games::{registry, GameCli};
+use uesave::{StructType, Types};
 
 #[derive(Parser, Debug)]
 struct ActionToJson {
@@ -28,6 +29,10 @@ struct ActionToJson {
     ///   -t .EnemiesKilled.Value=Struct
     #[arg(short, long, value_parser = parse_type)]
     r#type: Vec<(String, StructType)>,
+
+    /// Game whose save format to use (an invalid name lists the available games)
+    #[arg(long, default_value = "none")]
+    game: String,
 }
 
 #[derive(Parser, Debug)]
@@ -37,6 +42,14 @@ struct ActionFromJson {
 
     #[arg(short, long, default_value = "-")]
     output: String,
+
+    /// Game whose save format to use (an invalid name lists the available games)
+    #[arg(long, default_value = "none")]
+    game: String,
+
+    /// Output container format for this game (default: uncompressed)
+    #[arg(long)]
+    format: Option<String>,
 }
 
 #[derive(Parser, Debug)]
@@ -58,6 +71,14 @@ struct ActionEdit {
     ///   -t .EnemiesKilled.Value=Struct
     #[arg(short, long, value_parser = parse_type)]
     r#type: Vec<(String, StructType)>,
+
+    /// Game whose save format to use (an invalid name lists the available games)
+    #[arg(long, default_value = "none")]
+    game: String,
+
+    /// Output container format for this game (default: uncompressed)
+    #[arg(long)]
+    format: Option<String>,
 }
 
 #[derive(Parser, Debug)]
@@ -88,6 +109,10 @@ struct ActionTestResave {
     ///   -t .EnemiesKilled.Value=Struct
     #[arg(short, long, value_parser = parse_type)]
     r#type: Vec<(String, StructType)>,
+
+    /// Game whose save format to use (an invalid name lists the available games)
+    #[arg(long, default_value = "none")]
+    game: String,
 }
 
 #[derive(Subcommand, Debug)]
@@ -117,120 +142,151 @@ fn parse_type(t: &str) -> Result<(String, StructType)> {
     }
 }
 
+fn pick<'a>(reg: &'a [Box<dyn GameCli>], name: &str) -> Result<&'a dyn GameCli> {
+    reg.iter()
+        .map(|h| h.as_ref())
+        .find(|h| h.name() == name)
+        .ok_or_else(|| {
+            let names: Vec<_> = reg.iter().map(|h| h.name()).collect();
+            anyhow!("unknown game {name:?}; available: {}", names.join(", "))
+        })
+}
+
+fn check_format(handler: &dyn GameCli, format: Option<&str>) -> Result<()> {
+    let Some(f) = format else { return Ok(()) };
+    if handler.formats().contains(&f) {
+        return Ok(());
+    }
+    let available = if handler.formats().is_empty() {
+        "(none)".to_string()
+    } else {
+        handler.formats().join(", ")
+    };
+    Err(anyhow!(
+        "unknown format {f:?} for game {}; available: {available}",
+        handler.name()
+    ))
+}
+
+/// Game defaults plus any user `-t path=Type` overrides.
+fn merge_types(mut types: Types, overrides: Vec<(String, StructType)>) -> Types {
+    for (path, t) in overrides {
+        types.add(path, t);
+    }
+    types
+}
+
 pub fn main() -> Result<()> {
     let args = Args::parse();
 
+    let reg = registry();
     match args.action {
-        Action::ToJson(action) => {
-            let mut types = Types::new();
-            for (path, t) in action.r#type {
-                types.add(path, t);
-            }
+        Action::ToJson(mut action) => {
+            let handler = pick(&reg, &action.game)?;
+            let types = merge_types(handler.default_types(), std::mem::take(&mut action.r#type));
+            let mut buf = vec![];
+            handler.to_json(&mut input(&action.input)?, &mut buf, types, !action.no_warn)?;
+            output(&action.output)?.write_all(&buf)?;
+        }
+        Action::FromJson(action) => {
+            let handler = pick(&reg, &action.game)?;
+            check_format(handler, action.format.as_deref())?;
+            let mut buf = vec![];
+            handler.from_json(
+                &mut input(&action.input)?,
+                &mut buf,
+                action.format.as_deref(),
+            )?;
+            output(&action.output)?.write_all(&buf)?;
+        }
+        Action::Edit(mut action) => {
+            let handler = pick(&reg, &action.game)?;
+            check_format(handler, action.format.as_deref())?;
+            let types = merge_types(handler.default_types(), std::mem::take(&mut action.r#type));
 
-            let save = SaveReader::new()
-                .log(!action.no_warn)
-                .error_to_raw(true)
-                .types(types)
-                .read(input(&action.input)?)?;
-            serde_json::to_writer_pretty(output(&action.output)?, &save)?;
-        }
-        Action::FromJson(io) => {
-            let save: Save = serde_json::from_reader(&mut input(&io.input)?)?;
-            save.write(&mut output(&io.output)?)?;
-        }
-        Action::TestResave(action) => {
-            let mut types = Types::new();
-            for (path, t) in action.r#type {
-                types.add(path, t);
+            let bytes = fs::read(&action.path)?;
+            let mut json = vec![];
+            handler.to_json(&mut Cursor::new(&bytes), &mut json, types, !action.no_warn)?;
+
+            let edited = edit::edit_bytes_with_builder(
+                json.clone(),
+                tempfile::Builder::new().suffix(".json"),
+            )?;
+
+            if edited == json {
+                println!("File unchanged, doing nothing.");
+            } else {
+                println!("File modified, writing new save.");
+                let mut buf = vec![];
+                handler.from_json(
+                    &mut Cursor::new(&edited),
+                    &mut buf,
+                    action.format.as_deref(),
+                )?;
+                let mut writer = open_for_write(&action.path)?;
+                writer.write_all(&buf)?;
             }
+        }
+        Action::TestResave(mut action) => {
+            let handler = pick(&reg, &action.game)?;
+            let mut types =
+                merge_types(handler.default_types(), std::mem::take(&mut action.r#type));
 
             let path = std::path::Path::new(&action.path);
-
             if let Ok(types_file) = fs::read_to_string(path.with_extension("types")) {
                 for t in types_file.lines() {
-                    if let Ok((path, t)) = parse_type(t) {
-                        types.add(path, t);
+                    if let Ok((p, ty)) = parse_type(t) {
+                        types.add(p, ty);
                     }
                 }
             }
 
-            let write_debug = |name: &str, data: &[u8]| -> Result<()> {
-                if action.debug {
+            let bytes = fs::read(path)?;
+            let want_debug = action.debug;
+            if want_debug {
+                fs::write("input.sav", &bytes)?;
+            }
+            let mut debug = |name: &str, data: &[u8]| -> std::result::Result<(), uesave::Error> {
+                if want_debug {
                     fs::write(name, data)?;
                 }
                 Ok(())
             };
 
-            let input = fs::read(path)?;
-            write_debug("input.sav", &input)?;
-
-            let sr = SaveReader::new()
-                .log(!action.no_warn)
-                .error_to_raw(true)
-                .types(types);
-            let mut reader = Cursor::new(&input);
+            let log = !action.no_warn;
             #[cfg(feature = "tracing")]
-            let save = if action.trace {
-                ser_hex::read("trace.json", &mut reader, |r| sr.read(r))?
-            } else {
-                sr.read(&mut reader)?
-            };
+            {
+                if action.trace {
+                    ser_hex::read("trace.json", &mut Cursor::new(&bytes), |r| {
+                        handler.test_resave(r, &bytes, types, log, &mut debug)
+                    })?;
+                } else {
+                    handler.test_resave(
+                        &mut Cursor::new(&bytes),
+                        &bytes,
+                        types,
+                        log,
+                        &mut debug,
+                    )?;
+                }
+            }
             #[cfg(not(feature = "tracing"))]
-            let save = sr.read(&mut reader)?;
+            handler.test_resave(&mut Cursor::new(&bytes), &bytes, types, log, &mut debug)?;
 
-            let mut output = vec![];
-            save.write(&mut output)?;
-            write_debug("output.sav", &output)?;
-            if input != output {
-                return Err(anyhow!("Resave did not match"));
-            }
-
-            let input_json = serde_json::to_vec_pretty(&save)?;
-            write_debug("input.json", &input_json)?;
-
-            let save_from_json: Save = serde_json::from_slice(&input_json)?;
-            let output_json = serde_json::to_vec_pretty(&save_from_json)?;
-            write_debug("output.json", &output_json)?;
-
-            let mut output = vec![];
-            save_from_json.write(&mut output)?;
-            write_debug("output.sav", &output)?;
-            if input != output {
-                return Err(anyhow!("JSON round trip did not match"));
-            }
             println!("Resave successful");
-        }
-        Action::Edit(action) => {
-            let mut types = Types::new();
-            for (path, t) in action.r#type {
-                types.add(path, t);
-            }
-
-            let save = SaveReader::new()
-                .log(!action.no_warn)
-                .error_to_raw(true)
-                .types(types)
-                .read(Cursor::new(fs::read(&action.path)?))?;
-            let modified_save: Save = serde_json::from_slice(&edit::edit_bytes_with_builder(
-                serde_json::to_vec_pretty(&save)?,
-                tempfile::Builder::new().suffix(".json"),
-            )?)?;
-
-            if save == modified_save {
-                println!("File unchanged, doing nothing.");
-            } else {
-                println!("File modified, writing new save.");
-                modified_save.write(&mut BufWriter::new(
-                    OpenOptions::new()
-                        .create(true)
-                        .truncate(true)
-                        .write(true)
-                        .open(action.path)?,
-                ))?;
-            }
         }
     }
     Ok(())
+}
+
+fn open_for_write(path: &str) -> Result<BufWriter<File>> {
+    Ok(BufWriter::new(
+        OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(path)?,
+    ))
 }
 
 fn input<'a>(path: &str) -> Result<Box<dyn BufRead + 'a>> {

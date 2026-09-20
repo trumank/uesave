@@ -1,6 +1,10 @@
 use std::io::{Read, Seek, Write};
 
-use crate::{Header, PropertyTagPartial, Result, SaveGameArchive, StructType, VersionInfo};
+use crate::game::Game;
+use crate::{
+    Header, Property, PropertyKey, PropertyTagPartial, Result, SaveGameArchive, StructType,
+    VersionInfo,
+};
 
 /// Defines the type system for an archive format.
 ///
@@ -27,6 +31,25 @@ pub trait ArchiveType: Clone + PartialEq + std::fmt::Debug + Default + serde::Se
         + std::fmt::Debug
         + serde::Serialize
         + for<'de> serde::Deserialize<'de>;
+
+    /// The game this archive type is bound to. Determines which game-specific
+    /// struct types and read/write hooks are used.
+    type Game: crate::game::Game;
+
+    /// Deserialize a schema-aware [`crate::Properties`] map for this archive
+    /// type. Game structs that embed nested properties (e.g. Palworld's
+    /// `PalCharacterData`) route their `Properties` field through here so the
+    /// property tags recorded at `{path}.{field}` in `schemas` are used to
+    /// interpret the untyped JSON. Dispatched on `Self` so the concrete
+    /// [`crate::Game`] behind `Self::Game` is known.
+    fn deserialize_properties<'de, D>(
+        path: &str,
+        schemas: &crate::PropertySchemas,
+        deserializer: D,
+    ) -> std::result::Result<crate::Properties<Self>, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+        Self: Sized;
 }
 
 pub trait ArchiveReader: Read + Seek {
@@ -72,6 +95,19 @@ pub trait ArchiveReader: Read + Seek {
     fn error_to_raw(&self) -> bool {
         false
     }
+
+    /// Post-process a freshly read property, called with the property name pushed on the scope.
+    /// Allows archive implementations to convert game-specific embedded data (e.g. Palworld
+    /// RawData byte arrays) into typed values. Implementations may update `tag` to reflect the
+    /// converted type; the updated tag is what gets recorded in the schemas.
+    fn post_process_property(
+        &mut self,
+        tag: &mut PropertyTagPartial,
+        value: Property<Self::ArchiveType>,
+    ) -> Result<Property<Self::ArchiveType>> {
+        let _ = tag;
+        Ok(value)
+    }
 }
 
 pub trait ArchiveWriter: Write + Seek {
@@ -114,26 +150,57 @@ pub trait ArchiveWriter: Write + Seek {
     fn log(&self) -> bool {
         false
     }
+
+    /// Pre-process a property about to be written, called with the property name pushed on the
+    /// scope. Allows archive implementations to convert typed game-specific values (e.g. Palworld
+    /// structs) back into their embedded representation (byte arrays). Returning `Some` replaces
+    /// both the tag and the property value used for writing.
+    #[allow(clippy::type_complexity)]
+    fn pre_write_property(
+        &mut self,
+        key: &PropertyKey,
+        tag: &PropertyTagPartial,
+        prop: &Property<Self::ArchiveType>,
+    ) -> Result<Option<(PropertyTagPartial, Property<Self::ArchiveType>)>> {
+        let _ = (key, tag, prop);
+        Ok(None)
+    }
 }
 
 /// Archive type for save games, which use string-based object references
 #[derive(Debug, Clone, PartialEq, Default, serde::Serialize)]
-pub struct SaveGameArchiveType;
+#[serde(bound = "")]
+pub struct SaveGameArchiveType<G: crate::game::Game = crate::game::NoGame>(
+    std::marker::PhantomData<G>,
+);
 
-impl ArchiveType for SaveGameArchiveType {
+impl<G: crate::game::Game> ArchiveType for SaveGameArchiveType<G> {
     type ObjectRef = String;
     type SoftObjectPath = crate::SoftObjectPath;
+    type Game = G;
 
     fn is_null_object_ref(object_ref: &Self::ObjectRef) -> bool {
         object_ref.is_empty() || object_ref == "None"
     }
+
+    fn deserialize_properties<'de, D>(
+        path: &str,
+        schemas: &crate::PropertySchemas,
+        deserializer: D,
+    ) -> std::result::Result<crate::Properties<Self>, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        crate::serialization::deserialize_properties_seed::<D, G>(path, schemas, deserializer)
+    }
 }
 
-impl<R> ArchiveReader for SaveGameArchive<R>
+impl<R, G> ArchiveReader for SaveGameArchive<R, G>
 where
     R: Read + Seek,
+    G: Game,
 {
-    type ArchiveType = SaveGameArchiveType;
+    type ArchiveType = SaveGameArchiveType<G>;
 
     fn version(&self) -> &dyn VersionInfo {
         SaveGameArchive::version(self)
@@ -178,12 +245,21 @@ where
     fn error_to_raw(&self) -> bool {
         SaveGameArchive::error_to_raw(self)
     }
+
+    fn post_process_property(
+        &mut self,
+        tag: &mut PropertyTagPartial,
+        value: Property<SaveGameArchiveType<G>>,
+    ) -> Result<Property<SaveGameArchiveType<G>>> {
+        <<Self::ArchiveType as ArchiveType>::Game>::process_property_for_read(self, tag, value)
+    }
 }
-impl<W> ArchiveWriter for SaveGameArchive<W>
+impl<W, G> ArchiveWriter for SaveGameArchive<W, G>
 where
     W: Write + Seek,
+    G: Game,
 {
-    type ArchiveType = SaveGameArchiveType;
+    type ArchiveType = SaveGameArchiveType<G>;
 
     fn version(&self) -> &dyn VersionInfo {
         SaveGameArchive::version(self)
@@ -223,5 +299,14 @@ where
 
     fn log(&self) -> bool {
         SaveGameArchive::log(self)
+    }
+
+    fn pre_write_property(
+        &mut self,
+        key: &PropertyKey,
+        tag: &PropertyTagPartial,
+        prop: &Property<SaveGameArchiveType<G>>,
+    ) -> Result<Option<(PropertyTagPartial, Property<SaveGameArchiveType<G>>)>> {
+        <<Self::ArchiveType as ArchiveType>::Game>::process_property_for_write(self, key, tag, prop)
     }
 }

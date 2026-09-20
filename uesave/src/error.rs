@@ -12,6 +12,8 @@ pub enum Error {
     MissingPropertySchema(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("gvas json at {path}: {message}")]
+    GvasJson { path: String, message: String },
     #[error("{0}")]
     Other(String),
 }

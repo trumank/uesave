@@ -1,33 +1,124 @@
+use crate::game::Game;
 use crate::{
-    FClothLODDataCommon, FMeshToMeshVertData, FNiagaraVariable, FNiagaraVariableBase,
-    FNiagaraVariableWithOffset, Properties, Property, PropertyKey, PropertySchemas,
-    PropertyTagDataPartial, Root, Save, SoftObjectPath, StructType, StructValue, ValueVec,
+    ArchiveType, ByteArray, FClothLODDataCommon, FMeshToMeshVertData, FNiagaraVariable,
+    FNiagaraVariableBase, FNiagaraVariableWithOffset, Properties, Property, PropertyKey,
+    PropertySchemas, PropertyTagDataPartial, Root, Save, SaveGameArchiveType, SoftObjectPath,
+    StructType, StructValue, ValueVec,
 };
 use serde::{
     de::{DeserializeSeed, MapAccess, SeqAccess, Visitor},
     Deserialize, Deserializer,
 };
+use std::cell::RefCell;
 use std::fmt;
+use std::marker::PhantomData;
+
+// ---------------------------------------------------------------------------
+// Schema-aware `Properties` deserialization context.
+//
+// Game structs (routed through [`Game::deserialize_struct`]) may embed nested
+// `Properties` fields that are not self-describing: interpreting their untyped
+// JSON needs the schema table plus the path prefix under which those nested
+// properties were recorded. Rather than thread a bespoke seed through every
+// game struct field (the structs are large externally-tagged enums), the
+// pipeline installs the (schemas, path) context here before deriving the game
+// struct, and `Deserialize for Properties<T>` reads it back.
+//
+// The context is a stack so nested game structs (a Properties inside a game
+// struct that itself contains another RawData game struct) each see their own
+// (schemas, path). The `*const PropertySchemas` is only ever read while the
+// `deserialize_struct` call that pushed it (and therefore the borrow it came
+// from) is still on the stack, so the deref is sound.
+// ---------------------------------------------------------------------------
+thread_local! {
+    static PROPERTIES_CTX: RefCell<Vec<(*const PropertySchemas, String)>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+/// RAII guard that pops the properties context pushed by [`push_properties_ctx`].
+pub(crate) struct PropertiesCtxGuard;
+
+impl Drop for PropertiesCtxGuard {
+    fn drop(&mut self) {
+        PROPERTIES_CTX.with(|c| {
+            c.borrow_mut().pop();
+        });
+    }
+}
+
+/// Install `(schemas, path)` as the active context for the duration of the
+/// returned guard. Call this before deriving a game struct that embeds nested
+/// [`Properties`]; the properties' tags live in `schemas` at `{path}.{field}`.
+pub(crate) fn push_properties_ctx(schemas: &PropertySchemas, path: &str) -> PropertiesCtxGuard {
+    PROPERTIES_CTX.with(|c| {
+        c.borrow_mut()
+            .push((schemas as *const PropertySchemas, path.to_string()));
+    });
+    PropertiesCtxGuard
+}
+
+/// Deserialize a `Properties<SaveGameArchiveType<G>>` using an explicit schema
+/// context. Exposed to [`ArchiveType::deserialize_properties`] so the concrete
+/// game `G` is threaded into the seed.
+pub(crate) fn deserialize_properties_seed<'de, D, G: Game>(
+    path: &str,
+    schemas: &PropertySchemas,
+    deserializer: D,
+) -> Result<Properties<SaveGameArchiveType<G>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    PropertiesSeed::<G> {
+        path,
+        schemas,
+        _game: PhantomData,
+    }
+    .deserialize(deserializer)
+}
+
+/// Native `Deserialize` for `Properties`, valid only inside a game struct
+/// deserialization (see the context module docs above). It reads the active
+/// `(schemas, path)` and dispatches on `T` so the correct game's schema-aware
+/// seed runs. Deserializing `Properties` outside such a context is an error.
+impl<'de, T: ArchiveType> Deserialize<'de> for Properties<T> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let ctx = PROPERTIES_CTX.with(|c| c.borrow().last().cloned());
+        let (schemas_ptr, path) = ctx.ok_or_else(|| {
+            serde::de::Error::custom(
+                "Properties can only be deserialized within a game struct context",
+            )
+        })?;
+        // SAFETY: `schemas_ptr` was produced from a `&PropertySchemas` borrow
+        // held by the `deserialize_struct` call still executing above us on the
+        // stack, so the pointee outlives this read.
+        let schemas: &PropertySchemas = unsafe { &*schemas_ptr };
+        T::deserialize_properties(&path, schemas, deserializer)
+    }
+}
 
 /// Generates one or more `DeserializeSeed`s that thread `PropertySchemas` + a
 /// path prefix through to any field marked `= "segment"`, which is seeded as a
 /// nested `Properties` at `{parent_path}.{segment}`. Unmarked fields use plain
-/// `Deserialize`.
+/// `Deserialize`. Each seed is generic over the active game `G`.
 macro_rules! properties_seeds {
     (
         $(
-            $value:ident => $seed:ident {
+            $ctor:ident : $value:ty => $seed:ident {
                 $( $field:ident : $ty:ty $( = $segment:literal )? ),+ $(,)?
             }
         )+
     ) => {
         $(
-            struct $seed<'a> {
+            struct $seed<'a, G: Game> {
                 path: &'a str,
                 schemas: &'a PropertySchemas,
+                _game: PhantomData<G>,
             }
 
-            impl<'de, 'a> DeserializeSeed<'de> for $seed<'a> {
+            impl<'de, 'a, G: Game> DeserializeSeed<'de> for $seed<'a, G> {
                 type Value = $value;
 
                 fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
@@ -38,11 +129,11 @@ macro_rules! properties_seeds {
                 }
             }
 
-            impl<'de, 'a> Visitor<'de> for $seed<'a> {
+            impl<'de, 'a, G: Game> Visitor<'de> for $seed<'a, G> {
                 type Value = $value;
 
                 fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-                    f.write_str(concat!(stringify!($value), " map"))
+                    f.write_str(concat!(stringify!($ctor), " map"))
                 }
 
                 fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
@@ -71,7 +162,7 @@ macro_rules! properties_seeds {
                         }
                     }
 
-                    Ok($value {
+                    Ok($ctor {
                         $(
                             $field: $field.ok_or_else(|| {
                                 serde::de::Error::missing_field(stringify!($field))
@@ -91,9 +182,10 @@ macro_rules! properties_seeds {
         } else {
             format!("{}.{}", $path, $segment)
         };
-        $m.next_value_seed(PropertiesSeed {
+        $m.next_value_seed(PropertiesSeed::<G> {
             path: &__sub_path,
             schemas: $schemas,
+            _game: PhantomData,
         })?
     }};
 
@@ -103,43 +195,44 @@ macro_rules! properties_seeds {
 }
 
 properties_seeds! {
-    Root => RootSeed {
+    Root : Root<SaveGameArchiveType<G>> => RootSeed {
         save_game_type: String,
-        properties: Properties = "",
+        properties: Properties<SaveGameArchiveType<G>> = "",
     }
 
-    FClothLODDataCommon => ClothLODDataCommonSeed {
-        properties: Properties = "properties",
+    FClothLODDataCommon : FClothLODDataCommon<SaveGameArchiveType<G>> => ClothLODDataCommonSeed {
+        properties: Properties<SaveGameArchiveType<G>> = "properties",
         transition_up_skin_data: Vec<FMeshToMeshVertData>,
         transition_down_skin_data: Vec<FMeshToMeshVertData>,
     }
 
-    FNiagaraVariableBase => NiagaraVariableBaseSeed {
+    FNiagaraVariableBase : FNiagaraVariableBase<SaveGameArchiveType<G>> => NiagaraVariableBaseSeed {
         name: String,
-        type_def: Properties = "type_def",
+        type_def: Properties<SaveGameArchiveType<G>> = "type_def",
     }
 
-    FNiagaraVariable => NiagaraVariableSeed {
+    FNiagaraVariable : FNiagaraVariable<SaveGameArchiveType<G>> => NiagaraVariableSeed {
         name: String,
-        type_def: Properties = "type_def",
+        type_def: Properties<SaveGameArchiveType<G>> = "type_def",
         var_data: Vec<u8>,
     }
 
-    FNiagaraVariableWithOffset => NiagaraVariableWithOffsetSeed {
+    FNiagaraVariableWithOffset : FNiagaraVariableWithOffset<SaveGameArchiveType<G>> => NiagaraVariableWithOffsetSeed {
         name: String,
-        type_def: Properties = "type_def",
+        type_def: Properties<SaveGameArchiveType<G>> = "type_def",
         offset: i32,
     }
 }
 
-struct PropertySeed<'a> {
+struct PropertySeed<'a, G: Game> {
     tag: &'a PropertyTagDataPartial,
     path: &'a str,
     schemas: &'a PropertySchemas,
+    _game: PhantomData<G>,
 }
 
-impl<'de, 'a> DeserializeSeed<'de> for PropertySeed<'a> {
-    type Value = Property;
+impl<'de, 'a, G: Game> DeserializeSeed<'de> for PropertySeed<'a, G> {
+    type Value = Property<SaveGameArchiveType<G>>;
 
     fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
     where
@@ -211,8 +304,7 @@ impl<'de, 'a> DeserializeSeed<'de> for PropertySeed<'a> {
                 | PropertyType::SetProperty
                 | PropertyType::MapProperty
                 | PropertyType::StructProperty => Err(serde::de::Error::custom(format!(
-                    "Property type {:?} should not appear in Other variant",
-                    pt
+                    "Property type {pt:?} should not appear in Other variant"
                 ))),
             },
             PropertyTagDataPartial::Byte(_enum_type) => {
@@ -222,28 +314,45 @@ impl<'de, 'a> DeserializeSeed<'de> for PropertySeed<'a> {
                 Ok(Property::Enum(String::deserialize(deserializer)?))
             }
             PropertyTagDataPartial::Struct { struct_type, .. } => {
-                let sv = StructValueSeed {
-                    struct_type,
-                    path: self.path,
-                    schemas: self.schemas,
+                // A game (embedded-RawData) struct may have been left as an
+                // empty/unparsed byte array on read (paths shared by many map
+                // entries record a single schema, so an entry that stayed raw
+                // still serializes as a byte array). Accept either shape: a JSON
+                // map is the typed game struct, a JSON sequence is leftover bytes.
+                if matches!(struct_type, StructType::Game(_)) {
+                    deserializer.deserialize_any(GameStructOrBytesSeed::<G> {
+                        struct_type,
+                        path: self.path,
+                        schemas: self.schemas,
+                        _game: PhantomData,
+                    })
+                } else {
+                    let sv = StructValueSeed::<G> {
+                        struct_type,
+                        path: self.path,
+                        schemas: self.schemas,
+                        _game: PhantomData,
+                    }
+                    .deserialize(deserializer)?;
+                    Ok(Property::Struct(sv))
                 }
-                .deserialize(deserializer)?;
-                Ok(Property::Struct(sv))
             }
             PropertyTagDataPartial::Array(inner_tag) => {
-                let va = ValueVecSeed {
+                let va = ValueVecSeed::<G> {
                     tag: inner_tag,
                     path: self.path,
                     schemas: self.schemas,
+                    _game: PhantomData,
                 }
                 .deserialize(deserializer)?;
                 Ok(Property::Array(va))
             }
             PropertyTagDataPartial::Set { key_type } => {
-                let vs = ValueVecSeed {
+                let vs = ValueVecSeed::<G> {
                     tag: key_type,
                     path: self.path,
                     schemas: self.schemas,
+                    _game: PhantomData,
                 }
                 .deserialize(deserializer)?;
                 Ok(Property::Set(vs))
@@ -252,11 +361,12 @@ impl<'de, 'a> DeserializeSeed<'de> for PropertySeed<'a> {
                 key_type,
                 value_type,
             } => {
-                let entries = MapEntriesSeed {
+                let entries = MapEntriesSeed::<G> {
                     key_type,
                     value_type,
                     path: self.path,
                     schemas: self.schemas,
+                    _game: PhantomData,
                 }
                 .deserialize(deserializer)?;
                 Ok(Property::Map(entries))
@@ -265,14 +375,123 @@ impl<'de, 'a> DeserializeSeed<'de> for PropertySeed<'a> {
     }
 }
 
-struct StructValueSeed<'a> {
+/// Deserializes a `StructType::Game` property that may be either the typed game
+/// struct (a JSON map) or a leftover empty/unparsed byte array (a JSON
+/// sequence). Handled at the `Property` level because a `StructValue`-only seed
+/// cannot express the byte-array shape.
+struct GameStructOrBytesSeed<'a, G: Game> {
     struct_type: &'a StructType,
     path: &'a str,
     schemas: &'a PropertySchemas,
+    _game: PhantomData<G>,
 }
 
-impl<'de, 'a> DeserializeSeed<'de> for StructValueSeed<'a> {
-    type Value = StructValue;
+impl<'de, 'a, G: Game> DeserializeSeed<'de> for GameStructOrBytesSeed<'a, G> {
+    type Value = Property<SaveGameArchiveType<G>>;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_any(self)
+    }
+}
+
+impl<'de, 'a, G: Game> Visitor<'de> for GameStructOrBytesSeed<'a, G> {
+    type Value = Property<SaveGameArchiveType<G>>;
+
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str("a game struct map or a raw byte array")
+    }
+
+    // A bare JSON array is a raw byte payload (kept for robustness; the crate's
+    // own byte arrays serialize as `{"Byte": [...]}`, handled in `visit_map`).
+    fn visit_seq<A>(self, seq: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        let bytes = Vec::<u8>::deserialize(serde::de::value::SeqAccessDeserializer::new(seq))?;
+        Ok(Property::Array(ValueVec::Byte(ByteArray::Byte(bytes))))
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        // `ByteArray` serializes externally tagged (`{"Byte": [...]}` /
+        // `{"Label": [...]}`), so a leftover/empty byte payload arrives here as
+        // a map too. Peek the first key to tell a byte payload apart from a game
+        // struct map; if it is a struct, re-inject the key and parse the struct.
+        let Some(first_key) = map.next_key::<String>()? else {
+            return Err(serde::de::Error::custom(format!(
+                "empty map for {:?} property",
+                self.struct_type
+            )));
+        };
+        match first_key.as_str() {
+            "Byte" => Ok(Property::Array(ValueVec::Byte(ByteArray::Byte(
+                map.next_value()?,
+            )))),
+            "Label" => Ok(Property::Array(ValueVec::Byte(ByteArray::Label(
+                map.next_value()?,
+            )))),
+            _ => {
+                let sv = StructValueSeed::<G> {
+                    struct_type: self.struct_type,
+                    path: self.path,
+                    schemas: self.schemas,
+                    _game: PhantomData,
+                }
+                .deserialize(serde::de::value::MapAccessDeserializer::new(
+                    PrependedMapAccess {
+                        first_key: Some(first_key),
+                        inner: map,
+                    },
+                ))?;
+                Ok(Property::Struct(sv))
+            }
+        }
+    }
+}
+
+/// A [`MapAccess`] adapter that re-injects an already-consumed first key, so a
+/// map whose first key was peeked can still be handed to a struct deserializer.
+struct PrependedMapAccess<M> {
+    first_key: Option<String>,
+    inner: M,
+}
+
+impl<'de, M: MapAccess<'de>> MapAccess<'de> for PrependedMapAccess<M> {
+    type Error = M::Error;
+
+    fn next_key_seed<K>(&mut self, seed: K) -> Result<Option<K::Value>, Self::Error>
+    where
+        K: DeserializeSeed<'de>,
+    {
+        use serde::de::IntoDeserializer;
+        if let Some(key) = self.first_key.take() {
+            return seed.deserialize(key.into_deserializer()).map(Some);
+        }
+        self.inner.next_key_seed(seed)
+    }
+
+    fn next_value_seed<V>(&mut self, seed: V) -> Result<V::Value, Self::Error>
+    where
+        V: DeserializeSeed<'de>,
+    {
+        self.inner.next_value_seed(seed)
+    }
+}
+
+struct StructValueSeed<'a, G: Game> {
+    struct_type: &'a StructType,
+    path: &'a str,
+    schemas: &'a PropertySchemas,
+    _game: PhantomData<G>,
+}
+
+impl<'de, 'a, G: Game> DeserializeSeed<'de> for StructValueSeed<'a, G> {
+    type Value = StructValue<SaveGameArchiveType<G>>;
 
     fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
     where
@@ -387,41 +606,63 @@ impl<'de, 'a> DeserializeSeed<'de> for StructValueSeed<'a> {
                     crate::FNiagaraDataInterfaceGPUParamInfo::deserialize(deserializer)?,
                 ))
             }
-            StructType::FontData => Ok(StructValue::FontData(crate::FFontData::deserialize(
-                deserializer,
+            StructType::FontData => Ok(StructValue::FontData(crate::FFontData::<
+                SaveGameArchiveType<G>,
+            >::deserialize(
+                deserializer
             )?)),
             StructType::ClothLODDataCommon => Ok(StructValue::ClothLODDataCommon(
-                ClothLODDataCommonSeed {
+                ClothLODDataCommonSeed::<G> {
                     path: self.path,
                     schemas: self.schemas,
+                    _game: PhantomData,
                 }
                 .deserialize(deserializer)?,
             )),
             StructType::NiagaraVariable => Ok(StructValue::NiagaraVariable(
-                NiagaraVariableSeed {
+                NiagaraVariableSeed::<G> {
                     path: self.path,
                     schemas: self.schemas,
+                    _game: PhantomData,
                 }
                 .deserialize(deserializer)?,
             )),
             StructType::NiagaraVariableBase => Ok(StructValue::NiagaraVariableBase(
-                NiagaraVariableBaseSeed {
+                NiagaraVariableBaseSeed::<G> {
                     path: self.path,
                     schemas: self.schemas,
+                    _game: PhantomData,
                 }
                 .deserialize(deserializer)?,
             )),
             StructType::NiagaraVariableWithOffset => Ok(StructValue::NiagaraVariableWithOffset(
-                NiagaraVariableWithOffsetSeed {
+                NiagaraVariableWithOffsetSeed::<G> {
                     path: self.path,
                     schemas: self.schemas,
+                    _game: PhantomData,
                 }
                 .deserialize(deserializer)?,
             )),
+            StructType::Game(type_path) => {
+                // Route typed game structs through the active game's
+                // `deserialize_struct`, threading the property path + schemas so
+                // structs embedding nested `Properties` can reconstruct them.
+                let name = type_path.rsplit('.').next().unwrap_or(type_path);
+                Ok(StructValue::Game(<G as Game>::deserialize_struct::<
+                    D,
+                    SaveGameArchiveType<G>,
+                >(
+                    name,
+                    self.path,
+                    self.schemas,
+                    deserializer,
+                )?))
+            }
             StructType::Struct(_) => {
-                let props = PropertiesSeed {
+                let props = PropertiesSeed::<G> {
                     path: self.path,
                     schemas: self.schemas,
+                    _game: PhantomData,
                 }
                 .deserialize(deserializer)?;
                 Ok(StructValue::Struct(props))
@@ -431,14 +672,15 @@ impl<'de, 'a> DeserializeSeed<'de> for StructValueSeed<'a> {
     }
 }
 
-struct StructVecSeed<'a> {
+struct StructVecSeed<'a, G: Game> {
     struct_type: &'a StructType,
     path: &'a str,
     schemas: &'a PropertySchemas,
+    _game: PhantomData<G>,
 }
 
-impl<'de, 'a> DeserializeSeed<'de> for StructVecSeed<'a> {
-    type Value = Vec<StructValue>;
+impl<'de, 'a, G: Game> DeserializeSeed<'de> for StructVecSeed<'a, G> {
+    type Value = Vec<StructValue<SaveGameArchiveType<G>>>;
 
     fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
     where
@@ -448,8 +690,8 @@ impl<'de, 'a> DeserializeSeed<'de> for StructVecSeed<'a> {
     }
 }
 
-impl<'de, 'a> Visitor<'de> for StructVecSeed<'a> {
-    type Value = Vec<StructValue>;
+impl<'de, 'a, G: Game> Visitor<'de> for StructVecSeed<'a, G> {
+    type Value = Vec<StructValue<SaveGameArchiveType<G>>>;
 
     fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.write_str("array or set of structs")
@@ -460,10 +702,11 @@ impl<'de, 'a> Visitor<'de> for StructVecSeed<'a> {
         A: SeqAccess<'de>,
     {
         let mut vec = Vec::new();
-        while let Some(elem) = seq.next_element_seed(StructValueSeed {
+        while let Some(elem) = seq.next_element_seed(StructValueSeed::<G> {
             struct_type: self.struct_type,
             path: self.path,
             schemas: self.schemas,
+            _game: PhantomData,
         })? {
             vec.push(elem);
         }
@@ -471,14 +714,15 @@ impl<'de, 'a> Visitor<'de> for StructVecSeed<'a> {
     }
 }
 
-struct ValueVecSeed<'a> {
+struct ValueVecSeed<'a, G: Game> {
     tag: &'a PropertyTagDataPartial,
     path: &'a str,
     schemas: &'a PropertySchemas,
+    _game: PhantomData<G>,
 }
 
-impl<'de, 'a> DeserializeSeed<'de> for ValueVecSeed<'a> {
-    type Value = ValueVec;
+impl<'de, 'a, G: Game> DeserializeSeed<'de> for ValueVecSeed<'a, G> {
+    type Value = ValueVec<SaveGameArchiveType<G>>;
 
     fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
     where
@@ -486,10 +730,11 @@ impl<'de, 'a> DeserializeSeed<'de> for ValueVecSeed<'a> {
     {
         match self.tag {
             PropertyTagDataPartial::Struct { struct_type, .. } => {
-                let structs = StructVecSeed {
+                let structs = StructVecSeed::<G> {
                     struct_type,
                     path: self.path,
                     schemas: self.schemas,
+                    _game: PhantomData,
                 }
                 .deserialize(deserializer)?;
                 Ok(ValueVec::Struct(structs))
@@ -559,8 +804,7 @@ impl<'de, 'a> DeserializeSeed<'de> for ValueVecSeed<'a> {
                     | PropertyType::MulticastInlineDelegateProperty
                     | PropertyType::MulticastSparseDelegateProperty => {
                         Err(serde::de::Error::custom(format!(
-                            "Unexpected property type {:?} in array",
-                            pt
+                            "Unexpected property type {pt:?} in array"
                         )))
                     }
                 }
@@ -580,15 +824,16 @@ impl<'de, 'a> DeserializeSeed<'de> for ValueVecSeed<'a> {
     }
 }
 
-struct MapEntriesSeed<'a> {
+struct MapEntriesSeed<'a, G: Game> {
     key_type: &'a PropertyTagDataPartial,
     value_type: &'a PropertyTagDataPartial,
     path: &'a str,
     schemas: &'a PropertySchemas,
+    _game: PhantomData<G>,
 }
 
-impl<'de, 'a> DeserializeSeed<'de> for MapEntriesSeed<'a> {
-    type Value = Vec<crate::MapEntry>;
+impl<'de, 'a, G: Game> DeserializeSeed<'de> for MapEntriesSeed<'a, G> {
+    type Value = Vec<crate::MapEntry<SaveGameArchiveType<G>>>;
 
     fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
     where
@@ -598,8 +843,8 @@ impl<'de, 'a> DeserializeSeed<'de> for MapEntriesSeed<'a> {
     }
 }
 
-impl<'de, 'a> Visitor<'de> for MapEntriesSeed<'a> {
-    type Value = Vec<crate::MapEntry>;
+impl<'de, 'a, G: Game> Visitor<'de> for MapEntriesSeed<'a, G> {
+    type Value = Vec<crate::MapEntry<SaveGameArchiveType<G>>>;
 
     fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.write_str("array of map entries")
@@ -610,11 +855,12 @@ impl<'de, 'a> Visitor<'de> for MapEntriesSeed<'a> {
         A: SeqAccess<'de>,
     {
         let mut vec = Vec::new();
-        while let Some(elem) = seq.next_element_seed(MapEntrySeed {
+        while let Some(elem) = seq.next_element_seed(MapEntrySeed::<G> {
             key_type: self.key_type,
             value_type: self.value_type,
             path: self.path,
             schemas: self.schemas,
+            _game: PhantomData,
         })? {
             vec.push(elem);
         }
@@ -622,15 +868,16 @@ impl<'de, 'a> Visitor<'de> for MapEntriesSeed<'a> {
     }
 }
 
-struct MapEntrySeed<'a> {
+struct MapEntrySeed<'a, G: Game> {
     key_type: &'a PropertyTagDataPartial,
     value_type: &'a PropertyTagDataPartial,
     path: &'a str,
     schemas: &'a PropertySchemas,
+    _game: PhantomData<G>,
 }
 
-impl<'de, 'a> DeserializeSeed<'de> for MapEntrySeed<'a> {
-    type Value = crate::MapEntry;
+impl<'de, 'a, G: Game> DeserializeSeed<'de> for MapEntrySeed<'a, G> {
+    type Value = crate::MapEntry<SaveGameArchiveType<G>>;
 
     fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
     where
@@ -640,8 +887,8 @@ impl<'de, 'a> DeserializeSeed<'de> for MapEntrySeed<'a> {
     }
 }
 
-impl<'de, 'a> Visitor<'de> for MapEntrySeed<'a> {
-    type Value = crate::MapEntry;
+impl<'de, 'a, G: Game> Visitor<'de> for MapEntrySeed<'a, G> {
+    type Value = crate::MapEntry<SaveGameArchiveType<G>>;
 
     fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.write_str("map entry with key and value fields")
@@ -664,17 +911,19 @@ impl<'de, 'a> Visitor<'de> for MapEntrySeed<'a> {
         while let Some(field) = map.next_key()? {
             match field {
                 Field::Key => {
-                    key = Some(map.next_value_seed(PropertySeed {
+                    key = Some(map.next_value_seed(PropertySeed::<G> {
                         tag: self.key_type,
                         path: self.path,
                         schemas: self.schemas,
+                        _game: PhantomData,
                     })?);
                 }
                 Field::Value => {
-                    value = Some(map.next_value_seed(PropertySeed {
+                    value = Some(map.next_value_seed(PropertySeed::<G> {
                         tag: self.value_type,
                         path: self.path,
                         schemas: self.schemas,
+                        _game: PhantomData,
                     })?);
                 }
             }
@@ -687,13 +936,14 @@ impl<'de, 'a> Visitor<'de> for MapEntrySeed<'a> {
     }
 }
 
-struct PropertiesSeed<'a> {
+struct PropertiesSeed<'a, G: Game> {
     path: &'a str,
     schemas: &'a PropertySchemas,
+    _game: PhantomData<G>,
 }
 
-impl<'de, 'a> DeserializeSeed<'de> for PropertiesSeed<'a> {
-    type Value = Properties;
+impl<'de, 'a, G: Game> DeserializeSeed<'de> for PropertiesSeed<'a, G> {
+    type Value = Properties<SaveGameArchiveType<G>>;
 
     fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
     where
@@ -703,8 +953,8 @@ impl<'de, 'a> DeserializeSeed<'de> for PropertiesSeed<'a> {
     }
 }
 
-impl<'de, 'a> Visitor<'de> for PropertiesSeed<'a> {
-    type Value = Properties;
+impl<'de, 'a, G: Game> Visitor<'de> for PropertiesSeed<'a, G> {
+    type Value = Properties<SaveGameArchiveType<G>>;
 
     fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.write_str("properties map")
@@ -724,13 +974,14 @@ impl<'de, 'a> Visitor<'de> for PropertiesSeed<'a> {
             };
 
             let tag = self.schemas.schemas().get(&prop_path).ok_or_else(|| {
-                serde::de::Error::custom(format!("No schema for property: {}", prop_path))
+                serde::de::Error::custom(format!("No schema for property: {prop_path}"))
             })?;
 
-            let prop = map.next_value_seed(PropertySeed {
+            let prop = map.next_value_seed(PropertySeed::<G> {
                 tag: &tag.data,
                 path: &prop_path,
                 schemas: self.schemas,
+                _game: PhantomData,
             })?;
 
             properties.insert(key, prop);
@@ -740,8 +991,11 @@ impl<'de, 'a> Visitor<'de> for PropertiesSeed<'a> {
     }
 }
 
-// Deserialize implementation for Save
-impl<'de> Deserialize<'de> for Save {
+// Deserialize implementation for Save, generic over the active game `G`. All
+// property data is routed through the schema-aware seed pipeline above, so
+// `StructType::Game` reaches `<G>::deserialize_struct` and typed game structs
+// round-trip through JSON.
+impl<'de, G: Game> Deserialize<'de> for Save<G> {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -755,10 +1009,10 @@ impl<'de> Deserialize<'de> for Save {
             Extra,
         }
 
-        struct SaveVisitor;
+        struct SaveVisitor<G: Game>(PhantomData<G>);
 
-        impl<'de> Visitor<'de> for SaveVisitor {
-            type Value = Save;
+        impl<'de, G: Game> Visitor<'de> for SaveVisitor<G> {
+            type Value = Save<G>;
 
             fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
                 formatter.write_str("Save struct")
@@ -787,9 +1041,10 @@ impl<'de> Deserialize<'de> for Save {
                                 serde::de::Error::custom("schemas must appear before root in JSON")
                             })?;
 
-                            root = Some(map.next_value_seed(RootSeed {
+                            root = Some(map.next_value_seed(RootSeed::<G> {
                                 path: "",
                                 schemas: schemas_ref,
+                                _game: PhantomData,
                             })?);
                         }
                         Field::Extra => {
@@ -815,7 +1070,7 @@ impl<'de> Deserialize<'de> for Save {
         deserializer.deserialize_struct(
             "Save",
             &["header", "schemas", "root", "extra"],
-            SaveVisitor,
+            SaveVisitor::<G>(PhantomData),
         )
     }
 }
