@@ -13,7 +13,7 @@ use super::{
     PalBaseCamp, PalBuildProcess, PalCharacterContainer, PalCharacterData, PalConnector,
     PalDynamicItem, PalGroupData, PalGuildItemStorage, PalGuildLab, PalItemContainer,
     PalItemContainerSlot, PalMapConcreteModel, PalMapConcreteModelModule, PalMapModel, PalWork,
-    PalWorkAssign,
+    PalWorkAssign, PalWorkCollection, PalWorkerDirector,
 };
 
 /// The Palworld struct values, parsed from `RawData` byte arrays. Larger types
@@ -41,6 +41,8 @@ pub enum PalStruct<T: ArchiveType = SaveGameArchiveType> {
     MapModel(std::boxed::Box<PalMapModel>),
     MapConcreteModel(std::boxed::Box<PalMapConcreteModel<T>>),
     MapConcreteModelModule(PalMapConcreteModelModule),
+    WorkerDirector(std::boxed::Box<PalWorkerDirector>),
+    WorkCollection(PalWorkCollection),
 }
 
 impl<T: ArchiveType> GameStruct<T> for PalStruct<T> {
@@ -62,6 +64,8 @@ impl<T: ArchiveType> GameStruct<T> for PalStruct<T> {
             PalStruct::MapModel(v) => v.write(ar)?,
             PalStruct::MapConcreteModel(v) => v.write(ar)?,
             PalStruct::MapConcreteModelModule(v) => v.write(ar)?,
+            PalStruct::WorkerDirector(v) => v.write(ar)?,
+            PalStruct::WorkCollection(v) => v.write(ar)?,
         }
         Ok(())
     }
@@ -89,6 +93,8 @@ pub(crate) const PAL_STRUCT_TYPES: &[(&str, &str)] = &[
         "PalMapConcreteModelModule",
         "/Script/Pal.PalMapConcreteModelModule",
     ),
+    ("PalWorkerDirector", "/Script/Pal.PalWorkerDirector"),
+    ("PalWorkCollection", "/Script/Pal.PalWorkCollection"),
 ];
 
 /// Returns the bare (last-segment) struct-type name, whether given a bare name

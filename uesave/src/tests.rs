@@ -45,6 +45,35 @@ where
     })
 }
 
+fn palworld_header() -> Header {
+    Header {
+        magic: u32::from_le_bytes(*b"GVAS"),
+        save_game_version: 2,
+        package_version: PackageVersion {
+            ue4: 522,
+            ue5: Some(1008),
+        },
+        engine_version_major: 5,
+        engine_version_minor: 1,
+        engine_version_patch: 0,
+        engine_version_build: 0,
+        engine_version: String::from("5.1.0"),
+        custom_version: Some((3, vec![])),
+    }
+}
+
+/// Same as [`run_palworld`], but with a UE 5.1 header, so `Vector`/`Quat`
+/// read and write as the f64 layout real Palworld saves use.
+fn run_palworld_ue5<S, R, F>(s: S, f: F) -> Result<R>
+where
+    F: FnOnce(&mut SaveGameArchive<S, games::palworld::Palworld>) -> Result<R>,
+{
+    SaveGameArchive::run(s, |s| {
+        s.set_version(palworld_header());
+        f(s)
+    })
+}
+
 #[test]
 fn test_header() -> Result<()> {
     let original = [
@@ -1760,6 +1789,152 @@ fn test_palworld_facade_json_roundtrip() -> Result<()> {
     Ok(())
 }
 
+/// The base camp's worker director: a fixed 118-byte payload naming the base's
+/// worker character container.
+#[test]
+fn test_palworld_worker_director_round_trips() -> Result<()> {
+    use games::palworld::PalWorkerDirector;
+
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&unhex("ed321d99a74720d45205bca743a4b131")); // id
+    payload.extend_from_slice(&[0u8; 80]); // spawn_transform: 10 f64s
+    payload.push(3); // current_order_type
+    payload.push(1); // current_battle_type
+    payload.extend_from_slice(&unhex("ea696a6c4954bc615adc1ea15d76b4b0")); // container_id
+    payload.extend_from_slice(&[0, 0, 0, 0]); // trailing_bytes
+    assert_eq!(payload.len(), 118, "the layout is fixed at 118 bytes");
+
+    let director = run_palworld_ue5(Cursor::new(payload.clone()), |ar| {
+        PalWorkerDirector::read(ar)
+    })?;
+    assert_eq!(director.current_order_type, 3);
+    assert_eq!(director.current_battle_type, 1);
+
+    let mut out = Cursor::new(Vec::new());
+    run_palworld_ue5(&mut out, |ar| director.write(ar))?;
+    assert_eq!(out.into_inner(), payload, "write is the inverse of read");
+    Ok(())
+}
+
+/// The base camp's work collection: the list of work ids the base owns.
+#[test]
+fn test_palworld_work_collection_round_trips() -> Result<()> {
+    use games::palworld::PalWorkCollection;
+
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&unhex("723a35bf4a5ac811f04e79b613ac7529")); // own_id
+    payload.extend_from_slice(&2i32.to_le_bytes()); // work_ids count
+    payload.extend_from_slice(&unhex("bb232bbd4b0c8ccf3a948b8fd52396e3"));
+    payload.extend_from_slice(&unhex("eaad63d6491d6abf8b96f0873ef2c939"));
+    payload.extend_from_slice(&0u32.to_le_bytes()); // trailing_bytes
+
+    let collection =
+        run_palworld_ue5(Cursor::new(payload.clone()), |ar| PalWorkCollection::read(ar))?;
+    assert_eq!(collection.work_ids.len(), 2);
+
+    let mut out = Cursor::new(Vec::new());
+    run_palworld_ue5(&mut out, |ar| collection.write(ar))?;
+    assert_eq!(out.into_inner(), payload, "write is the inverse of read");
+    Ok(())
+}
+
+/// An empty collection is a count of zero, not an absent array.
+#[test]
+fn test_palworld_work_collection_handles_no_works() -> Result<()> {
+    use games::palworld::PalWorkCollection;
+
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&unhex("723a35bf4a5ac811f04e79b613ac7529"));
+    payload.extend_from_slice(&0i32.to_le_bytes());
+    payload.extend_from_slice(&0u32.to_le_bytes());
+
+    let collection = run_palworld_ue5(Cursor::new(payload), |ar| PalWorkCollection::read(ar))?;
+    assert!(collection.work_ids.is_empty());
+    Ok(())
+}
+
+/// A transport-item director carries the pals assigned to hauling.
+#[test]
+fn test_palworld_base_camp_module_transport_item_director_round_trips() -> Result<()> {
+    use games::palworld::{PalBaseCampModule, PalBaseCampModuleData};
+
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&1i32.to_le_bytes()); // one character info
+    payload.extend_from_slice(&0i32.to_le_bytes()); // its item_infos: empty
+    payload.extend_from_slice(&1.0f64.to_le_bytes()); // character_location.x
+    payload.extend_from_slice(&2.0f64.to_le_bytes()); // y
+    payload.extend_from_slice(&3.0f64.to_le_bytes()); // z
+    payload.extend_from_slice(&[0, 0, 0, 0]); // trailing_bytes
+
+    let module = run_palworld_ue5(Cursor::new(payload.clone()), |ar| {
+        PalBaseCampModule::read_with_module_type(
+            ar,
+            "EPalBaseCampModuleType::TransportItemDirector",
+        )
+    })?;
+    match &module.data {
+        PalBaseCampModuleData::TransportItemDirector { character_infos, .. } => {
+            assert_eq!(character_infos.len(), 1);
+            assert_eq!(character_infos[0].character_location.z.0, 3.0);
+        }
+        other => panic!("expected TransportItemDirector, got {other:?}"),
+    }
+
+    let mut out = Cursor::new(Vec::new());
+    run_palworld_ue5(&mut out, |ar| module.write(ar))?;
+    assert_eq!(out.into_inner(), payload, "write is the inverse of read");
+    Ok(())
+}
+
+/// A module type carrying no payload stays empty rather than consuming bytes.
+#[test]
+fn test_palworld_base_camp_module_no_op_type_reads_empty() -> Result<()> {
+    use games::palworld::{PalBaseCampModule, PalBaseCampModuleData};
+
+    let module = run_palworld_ue5(Cursor::new(Vec::new()), |ar| {
+        PalBaseCampModule::read_with_module_type(ar, "EPalBaseCampModuleType::Energy")
+    })?;
+    assert_eq!(module.data, PalBaseCampModuleData::NoOp);
+    Ok(())
+}
+
+/// An unhandled module type keeps its bytes rather than losing them.
+#[test]
+fn test_palworld_base_camp_module_unknown_type_falls_back_to_raw_bytes() -> Result<()> {
+    use games::palworld::{PalBaseCampModule, PalBaseCampModuleData};
+
+    let payload = vec![9u8, 8, 7];
+    let module = run_palworld_ue5(Cursor::new(payload.clone()), |ar| {
+        PalBaseCampModule::read_with_module_type(ar, "EPalBaseCampModuleType::SomethingNew")
+    })?;
+    assert_eq!(module.data, PalBaseCampModuleData::Unknown { data: payload });
+    Ok(())
+}
+
+/// The standalone codec (no property tree) round-trips the same bytes as
+/// `read_with_module_type`/`write`, and picks the f64 `Vector` layout when
+/// `engine_version_major` is 5.
+#[test]
+fn test_palworld_base_camp_module_standalone_bytes_round_trip() -> Result<()> {
+    use games::palworld::PalBaseCampModule;
+
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&1i32.to_le_bytes());
+    payload.extend_from_slice(&0i32.to_le_bytes());
+    payload.extend_from_slice(&1.0f64.to_le_bytes());
+    payload.extend_from_slice(&2.0f64.to_le_bytes());
+    payload.extend_from_slice(&3.0f64.to_le_bytes());
+    payload.extend_from_slice(&[0, 0, 0, 0]);
+
+    let module = PalBaseCampModule::from_bytes(
+        &payload,
+        "EPalBaseCampModuleType::TransportItemDirector",
+        5,
+    )?;
+    assert_eq!(module.to_bytes(5)?, payload, "to_bytes is the inverse of from_bytes");
+    Ok(())
+}
+
 #[cfg(feature = "gvas-json")]
 #[test]
 fn test_gvas_json_error_carries_the_property_path() {
@@ -1783,6 +1958,11 @@ mod gvas_json_tests {
     fn prop(json: &str) -> Property<SaveGameArchiveType<Palworld>> {
         let value: serde_json::Value = serde_json::from_str(json).expect("valid json");
         property_from_json::<Palworld>(&value, "test").expect("converts")
+    }
+
+    fn prop_at(path: &str, json: &str) -> Property<SaveGameArchiveType<Palworld>> {
+        let value: serde_json::Value = serde_json::from_str(json).expect("valid json");
+        property_from_json::<Palworld>(&value, path).expect("converts")
     }
 
     #[test]
@@ -2054,5 +2234,1684 @@ mod gvas_json_tests {
                 "id":null,"value":[]}"#,
         );
         assert_eq!(value, Property::Map(vec![]));
+    }
+
+    use crate::games::palworld::compat::{bool_or_u32, transform};
+
+    /// The dialect writes a JSON bool where uesave keeps the integer.
+    #[test]
+    fn a_u32_field_accepts_both_a_bool_and_an_integer() {
+        assert_eq!(bool_or_u32(&serde_json::json!(true), "p").unwrap(), 1);
+        assert_eq!(bool_or_u32(&serde_json::json!(false), "p").unwrap(), 0);
+        assert_eq!(bool_or_u32(&serde_json::json!(7), "p").unwrap(), 7);
+        assert!(bool_or_u32(&serde_json::json!("nope"), "p").is_err());
+    }
+
+    /// The dialect spells the scale component `scale3d`.
+    #[test]
+    fn a_transform_reads_scale_from_scale3d() {
+        let value = serde_json::json!({
+            "rotation": {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0},
+            "translation": {"x": 1.0, "y": 2.0, "z": 3.0},
+            "scale3d": {"x": 1.0, "y": 1.0, "z": 1.0}
+        });
+        let parsed = transform(&value, "p").expect("transform converts");
+        assert_eq!(parsed.translation.x.0, 1.0);
+        assert_eq!(parsed.scale.z.0, 1.0);
+    }
+
+    /// A game that implements no hook leaves decoded payloads to the default.
+    #[test]
+    fn the_default_game_hook_returns_none() {
+        let decoded = serde_json::json!({"state": 1});
+        assert!(NoGame::game_struct_from_gvas_json("anything", &decoded).unwrap().is_none());
+    }
+
+    /// When neither hook types a decoded payload, the walker must not silently drop
+    /// it as opaque bytes: it has no bytes to keep, only fields neither hook claimed.
+    #[test]
+    fn a_decoded_payload_neither_hook_types_errs() {
+        let value: serde_json::Value = serde_json::from_str(
+            r#"{"type":"ArrayProperty","array_type":"ByteProperty","id":null,
+                "value":{"state":1}}"#,
+        )
+        .unwrap();
+        let error = property_from_json::<NoGame>(&value, "worldSaveData.Thing").unwrap_err();
+        let Error::GvasJson { path, message } = error else { panic!("expected a GvasJson error") };
+        assert_eq!(path, "worldSaveData.Thing");
+        assert!(message.contains("does not type"), "message was: {message}");
+    }
+
+    use crate::games::palworld::PalStruct;
+
+    fn game_struct(path: &str, json: &str) -> PalStruct<SaveGameArchiveType<Palworld>> {
+        let value: serde_json::Value = serde_json::from_str(json).expect("valid json");
+        Palworld::game_struct_from_gvas_json(path, &value)
+            .expect("adapter runs")
+            .expect("path is typed")
+    }
+
+    #[test]
+    fn adapts_a_base_camp() {
+        let adapted = game_struct(
+            "worldSaveData.BaseCampSaveData.RawData",
+            r#"{"id":"c4e01fc6-3f51-477c-9338-11a15af52460","name":"Home","state":1,
+                "transform":{"rotation":{"x":0.0,"y":0.0,"z":0.0,"w":1.0},
+                             "translation":{"x":10.0,"y":20.0,"z":30.0},
+                             "scale3d":{"x":1.0,"y":1.0,"z":1.0}},
+                "area_range":3500.0,
+                "group_id_belong_to":"9d2ae570-428b-4517-4df1-68b7ed01dd4b",
+                "fast_travel_local_transform":{"rotation":{"x":0.0,"y":0.0,"z":0.0,"w":1.0},
+                             "translation":{"x":0.0,"y":0.0,"z":0.0},
+                             "scale3d":{"x":1.0,"y":1.0,"z":1.0}},
+                "owner_map_object_instance_id":"00000000-0000-0000-0000-000000000000",
+                "trailing_bytes":[0,0,0,0]}"#,
+        );
+        let PalStruct::BaseCamp(camp) = adapted else { panic!("expected BaseCamp") };
+        assert_eq!(camp.name, "Home");
+        assert_eq!(camp.area_range, 3500.0);
+        assert_eq!(camp.transform.translation.y.0, 20.0);
+        assert_eq!(camp.transform.scale.x.0, 1.0, "scale3d must land on scale");
+    }
+
+    #[test]
+    fn adapts_a_build_process() {
+        let adapted = game_struct(
+            "worldSaveData.MapObjectSaveData.Model.BuildProcess.RawData",
+            r#"{"state":1,"id":"00000000-0000-0000-0000-000000000000","trailing_bytes":[0,0,0,0]}"#,
+        );
+        assert!(matches!(adapted, PalStruct::BuildProcess(_)));
+    }
+
+    #[test]
+    fn an_untyped_path_returns_none() {
+        let value = serde_json::json!({"anything": 1});
+        assert!(Palworld::game_struct_from_gvas_json("worldSaveData.Nope.RawData", &value)
+            .unwrap()
+            .is_none());
+    }
+
+    /// The dialect misspells this field; the typo IS the wire format.
+    #[test]
+    fn adapts_a_map_model_from_the_misspelled_transform_cache() {
+        let adapted = game_struct(
+            "worldSaveData.MapObjectSaveData.Model.RawData",
+            r#"{"instance_id":"c57b4ddf-42a1-d22e-c831-ddac2315ea46",
+                "concrete_model_instance_id":"9f1f4b78-4df0-da8d-2e69-42b70b266f99",
+                "base_camp_id_belong_to":"c4e01fc6-3f51-477c-9338-11a15af52460",
+                "group_id_belong_to":"9d2ae570-428b-4517-4df1-68b7ed01dd4b",
+                "hp":{"current":15000,"max":15000},
+                "initital_transform_cache":{"rotation":{"x":0.0,"y":0.0,"z":0.0,"w":1.0},
+                    "translation":{"x":84158.75,"y":-145737.89,"z":-2041.54},
+                    "scale3d":{"x":1.0,"y":1.0,"z":1.0}},
+                "repair_work_id":"00000000-0000-0000-0000-000000000000",
+                "owner_spawner_level_object_instance_id":"00000000-0000-0000-0000-000000000000",
+                "owner_instance_id":"00000000-0000-0000-0000-000000000000",
+                "build_player_uid":"00000000-0000-0000-0000-000000000000",
+                "interact_restrict_type":0,
+                "deterioration_damage":0.0,
+                "stage_instance_id_belong_to":{"id":"00000000-0000-0000-0000-000000000000","valid":0},
+                "unknown_bytes":[0,0,0,0]}"#,
+        );
+        let PalStruct::MapModel(model) = adapted else { panic!("expected MapModel") };
+        assert_eq!(model.hp.current, 15000);
+        assert_eq!(model.initial_transform_cache.translation.z.0, -2041.54);
+        assert_eq!(model.initial_transform_cache.scale.y.0, 1.0);
+    }
+
+    /// Real exports write the nested `stage_instance_id_belong_to.valid` as a JSON
+    /// bool, one level deeper than `map_model`'s own `from_value` call reaches.
+    #[test]
+    fn adapts_a_map_model_with_a_boolean_stage_instance_valid() {
+        let adapted = game_struct(
+            "worldSaveData.MapObjectSaveData.Model.RawData",
+            r#"{"instance_id":"c57b4ddf-42a1-d22e-c831-ddac2315ea46",
+                "concrete_model_instance_id":"9f1f4b78-4df0-da8d-2e69-42b70b266f99",
+                "base_camp_id_belong_to":"c4e01fc6-3f51-477c-9338-11a15af52460",
+                "group_id_belong_to":"9d2ae570-428b-4517-4df1-68b7ed01dd4b",
+                "hp":{"current":15000,"max":15000},
+                "initital_transform_cache":{"rotation":{"x":0.0,"y":0.0,"z":0.0,"w":1.0},
+                    "translation":{"x":84158.75,"y":-145737.89,"z":-2041.54},
+                    "scale3d":{"x":1.0,"y":1.0,"z":1.0}},
+                "repair_work_id":"00000000-0000-0000-0000-000000000000",
+                "owner_spawner_level_object_instance_id":"00000000-0000-0000-0000-000000000000",
+                "owner_instance_id":"00000000-0000-0000-0000-000000000000",
+                "build_player_uid":"00000000-0000-0000-0000-000000000000",
+                "interact_restrict_type":0,
+                "deterioration_damage":0.0,
+                "stage_instance_id_belong_to":{"id":"00000000-0000-0000-0000-000000000000","valid":true},
+                "unknown_bytes":[0,0,0,0]}"#,
+        );
+        let PalStruct::MapModel(model) = adapted else { panic!("expected MapModel") };
+        assert_eq!(model.stage_instance_id_belong_to.valid, 1);
+    }
+
+    /// A committed fixture elsewhere writes `valid` as a large `u32`; both forms occur
+    /// in real exports and both must survive.
+    #[test]
+    fn adapts_a_map_model_with_a_large_u32_stage_instance_valid() {
+        let adapted = game_struct(
+            "worldSaveData.MapObjectSaveData.Model.RawData",
+            r#"{"instance_id":"c57b4ddf-42a1-d22e-c831-ddac2315ea46",
+                "concrete_model_instance_id":"9f1f4b78-4df0-da8d-2e69-42b70b266f99",
+                "base_camp_id_belong_to":"c4e01fc6-3f51-477c-9338-11a15af52460",
+                "group_id_belong_to":"9d2ae570-428b-4517-4df1-68b7ed01dd4b",
+                "hp":{"current":15000,"max":15000},
+                "initital_transform_cache":{"rotation":{"x":0.0,"y":0.0,"z":0.0,"w":1.0},
+                    "translation":{"x":84158.75,"y":-145737.89,"z":-2041.54},
+                    "scale3d":{"x":1.0,"y":1.0,"z":1.0}},
+                "repair_work_id":"00000000-0000-0000-0000-000000000000",
+                "owner_spawner_level_object_instance_id":"00000000-0000-0000-0000-000000000000",
+                "owner_instance_id":"00000000-0000-0000-0000-000000000000",
+                "build_player_uid":"00000000-0000-0000-0000-000000000000",
+                "interact_restrict_type":0,
+                "deterioration_damage":0.0,
+                "stage_instance_id_belong_to":{"id":"00000000-0000-0000-0000-000000000000","valid":3864341120},
+                "unknown_bytes":[0,0,0,0]}"#,
+        );
+        let PalStruct::MapModel(model) = adapted else { panic!("expected MapModel") };
+        assert_eq!(model.stage_instance_id_belong_to.valid, 3864341120);
+    }
+
+    #[test]
+    fn adapts_a_worker_director() {
+        let adapted = game_struct(
+            "worldSaveData.BaseCampSaveData.WorkerDirector.RawData",
+            r#"{"id":"ed321d99-47a7-20d4-5205-bca743a4b131",
+                "spawn_transform":{"rotation":{"x":0.0,"y":0.0,"z":0.0,"w":1.0},
+                    "translation":{"x":-102520.48,"y":40252.85,"z":2387.99},
+                    "scale3d":{"x":1.0,"y":1.0,"z":1.0}},
+                "current_order_type":0,"current_battle_type":0,
+                "container_id":"ea696a6c-4954-bc61-5adc-1ea15d76b4b0",
+                "trailing_bytes":[0,0,0,0]}"#,
+        );
+        let PalStruct::WorkerDirector(director) = adapted else { panic!("expected WorkerDirector") };
+        assert_eq!(
+            director.container_id,
+            FGuid::parse_str("ea696a6c-4954-bc61-5adc-1ea15d76b4b0").unwrap()
+        );
+        assert_eq!(director.spawn_transform.translation.y.0, 40252.85);
+    }
+
+    /// The dialect calls it `id`; uesave calls it `own_id`.
+    #[test]
+    fn adapts_a_work_collection_from_its_id_field() {
+        let adapted = game_struct(
+            "worldSaveData.BaseCampSaveData.WorkCollection.RawData",
+            r#"{"id":"723a35bf-4a5a-c811-f04e-79b613ac7529",
+                "work_ids":["bb232bbd-4b0c-8ccf-3a94-8b8fd52396e3"],
+                "trailing_bytes":[0,0,0,0]}"#,
+        );
+        let PalStruct::WorkCollection(collection) = adapted else { panic!("expected WorkCollection") };
+        assert_eq!(
+            collection.own_id,
+            FGuid::parse_str("723a35bf-4a5a-c811-f04e-79b613ac7529").unwrap()
+        );
+        assert_eq!(collection.work_ids.len(), 1);
+    }
+
+    /// `trailing_bytes` is the little-endian `u32` those 4 wire bytes decode to.
+    #[test]
+    fn a_work_collection_decodes_trailing_bytes_as_little_endian() {
+        let adapted = game_struct(
+            "worldSaveData.BaseCampSaveData.WorkCollection.RawData",
+            r#"{"id":"723a35bf-4a5a-c811-f04e-79b613ac7529",
+                "work_ids":[],
+                "trailing_bytes":[1,0,0,0]}"#,
+        );
+        let PalStruct::WorkCollection(collection) = adapted else { panic!("expected WorkCollection") };
+        assert_eq!(collection.trailing_bytes, 1);
+    }
+
+    use crate::games::palworld::{PalBaseCampModule, PalBaseCampModuleData, PalBaseCampPassiveEffect};
+
+    /// `ModuleMap.RawData` stays opaque bytes: no `PalStruct::BaseCampModule`
+    /// variant exists. The bytes hook re-encodes a decoded payload so it still
+    /// round-trips through the property tree as a byte array.
+    fn module_bytes(json: &str) -> Vec<u8> {
+        let value: serde_json::Value = serde_json::from_str(json).expect("valid json");
+        let property = property_from_json::<Palworld>(
+            &value,
+            "worldSaveData.BaseCampSaveData.ModuleMap.RawData",
+        )
+        .expect("adapter runs");
+        let Property::Array(ValueVec::Byte(ByteArray::Byte(bytes))) = property else {
+            panic!("expected an opaque byte array")
+        };
+        bytes
+    }
+
+    #[test]
+    fn adapts_a_transport_item_director_module_to_bytes() {
+        let bytes = module_bytes(
+            r#"{"type":"ArrayProperty","array_type":"ByteProperty","id":null,
+                "value":{"transport_item_character_infos":[],"trailing_bytes":[0,0,0,0]}}"#,
+        );
+        let module = PalBaseCampModule::from_bytes(
+            &bytes,
+            "EPalBaseCampModuleType::TransportItemDirector",
+            5,
+        )
+        .expect("decodes");
+        assert!(matches!(
+            module.data,
+            PalBaseCampModuleData::TransportItemDirector { .. }
+        ));
+    }
+
+    /// A module the dialect left empty carries no payload.
+    #[test]
+    fn adapts_an_empty_base_camp_module_as_no_op_bytes() {
+        let bytes = module_bytes(
+            r#"{"type":"ArrayProperty","array_type":"ByteProperty","id":null,"value":{}}"#,
+        );
+        assert!(bytes.is_empty());
+    }
+
+    /// `effect_type == 2` carries an extra byte plus a 12-byte trailer; the only
+    /// nontrivial shape the module bytes adapter encodes.
+    #[test]
+    fn adapts_passive_effects_module_and_round_trips_the_work_hard_trailer() {
+        let bytes = module_bytes(
+            r#"{"type":"ArrayProperty","array_type":"ByteProperty","id":null,
+                "value":{"passive_effects":[
+                    {"effect_type":1,"work_hard_type":null,"unknown_trailer":null},
+                    {"effect_type":2,"work_hard_type":3,
+                     "unknown_trailer":[1,2,3,4,5,6,7,8,9,10,11,12]}
+                ]}}"#,
+        );
+        let module = PalBaseCampModule::from_bytes(&bytes, "EPalBaseCampModuleType::PassiveEffect", 5)
+            .expect("decodes");
+        assert_eq!(
+            module.data,
+            PalBaseCampModuleData::PassiveEffect {
+                passive_effects: vec![
+                    PalBaseCampPassiveEffect {
+                        effect_type: 1,
+                        work_hard_type: None,
+                        unknown_trailer: None,
+                    },
+                    PalBaseCampPassiveEffect {
+                        effect_type: 2,
+                        work_hard_type: Some(3),
+                        unknown_trailer: Some(vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]),
+                    },
+                ],
+            }
+        );
+    }
+
+    /// An empty dict is a legitimate no-payload module; a non-empty dict whose
+    /// fields match no known module shape must error rather than silently
+    /// becoming `NoOp` and losing data.
+    #[test]
+    fn a_nonempty_unrecognized_module_shape_errs_but_empty_stays_no_op() {
+        let value: serde_json::Value = serde_json::from_str(
+            r#"{"type":"ArrayProperty","array_type":"ByteProperty","id":null,
+                "value":{"something_new":1}}"#,
+        )
+        .expect("valid json");
+        let error = property_from_json::<Palworld>(
+            &value,
+            "worldSaveData.BaseCampSaveData.ModuleMap.RawData",
+        )
+        .expect_err("unrecognized fields must error");
+        let Error::GvasJson { path, message } = error else { panic!("expected a GvasJson error") };
+        assert_eq!(path, "worldSaveData.BaseCampSaveData.ModuleMap.RawData");
+        assert!(message.contains("something_new"), "message was: {message}");
+
+        let bytes = module_bytes(
+            r#"{"type":"ArrayProperty","array_type":"ByteProperty","id":null,"value":{}}"#,
+        );
+        assert!(bytes.is_empty(), "an empty dict must still adapt as NoOp");
+    }
+
+    #[test]
+    fn the_default_bytes_hook_returns_none() {
+        let decoded = serde_json::json!({"state": 1});
+        assert!(NoGame::game_bytes_from_gvas_json("anything", &decoded).unwrap().is_none());
+    }
+
+    use crate::games::palworld::PalMapConcreteModelModuleData;
+
+    #[test]
+    fn adapts_an_item_container_module() {
+        let adapted = game_struct(
+            "worldSaveData.MapObjectSaveData.ConcreteModel.ModuleMap.RawData",
+            r#"{"target_container_id":"ea696a6c-4954-bc61-5adc-1ea15d76b4b0",
+                "slot_attribute_indexes":[],"all_slot_attribute":[],
+                "drop_item_at_disposed":true,"usage_type":0,"trailing_bytes":[0,0,0,0]}"#,
+        );
+        let PalStruct::MapConcreteModelModule(module) = adapted else { panic!("expected a module") };
+        match module.data {
+            PalMapConcreteModelModuleData::ItemContainer { drop_item_at_disposed, .. } => {
+                assert_eq!(drop_item_at_disposed, 1, "the dialect writes this bool; uesave keeps a u32");
+            }
+            other => panic!("expected ItemContainer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapts_a_character_container_module() {
+        let adapted = game_struct(
+            "worldSaveData.MapObjectSaveData.ConcreteModel.ModuleMap.RawData",
+            r#"{"target_container_id":"ea696a6c-4954-bc61-5adc-1ea15d76b4b0",
+                "trailing_bytes":[0,0,0,0]}"#,
+        );
+        let PalStruct::MapConcreteModelModule(module) = adapted else { panic!("expected a module") };
+        assert!(matches!(module.data, PalMapConcreteModelModuleData::CharacterContainer { .. }));
+    }
+
+    #[test]
+    fn adapts_a_workee_module() {
+        let adapted = game_struct(
+            "worldSaveData.MapObjectSaveData.ConcreteModel.ModuleMap.RawData",
+            r#"{"target_work_id":"bb232bbd-4b0c-8ccf-3a94-8b8fd52396e3","trailing_bytes":[0,0,0,0]}"#,
+        );
+        let PalStruct::MapConcreteModelModule(module) = adapted else { panic!("expected a module") };
+        assert!(matches!(module.data, PalMapConcreteModelModuleData::Workee { .. }));
+    }
+
+    #[test]
+    fn adapts_a_password_lock_module() {
+        let adapted = game_struct(
+            "worldSaveData.MapObjectSaveData.ConcreteModel.ModuleMap.RawData",
+            r#"{"lock_state":1,"password":"1234",
+                "player_infos":[{"player_uid":"ea696a6c-4954-bc61-5adc-1ea15d76b4b0",
+                                  "try_failed_count":2,"try_success_cache":1}],
+                "trailing_bytes":[0,0,0,0]}"#,
+        );
+        let PalStruct::MapConcreteModelModule(module) = adapted else { panic!("expected a module") };
+        match module.data {
+            PalMapConcreteModelModuleData::PasswordLock { lock_state, password, player_infos, .. } => {
+                assert_eq!(lock_state, 1);
+                assert_eq!(password, "1234");
+                assert_eq!(player_infos.len(), 1);
+                assert_eq!(player_infos[0].try_failed_count, 2);
+            }
+            other => panic!("expected PasswordLock, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapts_a_switch_module() {
+        let adapted = game_struct(
+            "worldSaveData.MapObjectSaveData.ConcreteModel.ModuleMap.RawData",
+            r#"{"switch_state":1,"trailing_bytes":[0,0,0,0]}"#,
+        );
+        let PalStruct::MapConcreteModelModule(module) = adapted else { panic!("expected a module") };
+        match module.data {
+            PalMapConcreteModelModuleData::Switch { switch_state, .. } => {
+                assert_eq!(switch_state, 1);
+            }
+            other => panic!("expected Switch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapts_an_unknown_module() {
+        let adapted = game_struct(
+            "worldSaveData.MapObjectSaveData.ConcreteModel.ModuleMap.RawData",
+            r#"{"unknown_bytes":[1,2,3,4]}"#,
+        );
+        let PalStruct::MapConcreteModelModule(module) = adapted else { panic!("expected a module") };
+        match module.data {
+            PalMapConcreteModelModuleData::Unknown { raw_bytes, .. } => {
+                assert_eq!(raw_bytes, vec![1, 2, 3, 4]);
+            }
+            other => panic!("expected Unknown, got {other:?}"),
+        }
+    }
+
+    /// An unrecognized non-empty shape must error rather than silently falling
+    /// through to a default variant and losing data.
+    #[test]
+    fn a_nonempty_unrecognized_concrete_model_module_shape_errs() {
+        let value: serde_json::Value = serde_json::from_str(r#"{"something_new":1}"#).unwrap();
+        let error = Palworld::game_struct_from_gvas_json(
+            "worldSaveData.MapObjectSaveData.ConcreteModel.ModuleMap.RawData",
+            &value,
+        )
+        .expect_err("unrecognized fields must error");
+        let Error::GvasJson { path, message } = error else { panic!("expected a GvasJson error") };
+        assert_eq!(path, "worldSaveData.MapObjectSaveData.ConcreteModel.ModuleMap.RawData");
+        assert!(message.contains("something_new"), "message was: {message}");
+    }
+
+    /// The sibling CustomVersionData is lifted into the struct, then removed from the
+    /// property tree. Left in place it would be written twice.
+    #[test]
+    fn a_module_entry_consumes_its_sibling_custom_version_data() {
+        let value = prop_at(
+            "worldSaveData.MapObjectSaveData.ConcreteModel.ModuleMap",
+            r#"{"type":"MapProperty","key_type":"EnumProperty","value_type":"StructProperty",
+                "id":null,
+                "value":[{"key":"EPalMapObjectConcreteModelModuleType::CharacterContainer",
+                  "value":{
+                    "RawData":{"type":"ArrayProperty","array_type":"ByteProperty","id":null,
+                      "value":{"target_container_id":"ea696a6c-4954-bc61-5adc-1ea15d76b4b0",
+                               "trailing_bytes":[0,0,0,0]}},
+                    "CustomVersionData":{"type":"ArrayProperty","array_type":"ByteProperty",
+                      "id":null,"value":{"values":[1,0,0,0]}}}}]}"#,
+        );
+        let Property::Map(entries) = value else { panic!("expected a map") };
+        let Property::Struct(StructValue::Struct(props)) = &entries[0].value else {
+            panic!("expected a struct value");
+        };
+        assert!(
+            props.0.get(&PropertyKey::from("CustomVersionData")).is_none(),
+            "the sibling must be consumed, not duplicated"
+        );
+        let Some(Property::Struct(StructValue::Game(PalStruct::MapConcreteModelModule(module)))) =
+            props.0.get(&PropertyKey::from("RawData"))
+        else {
+            panic!("expected a typed module");
+        };
+        assert_eq!(module.custom_version_data, vec![1, 0, 0, 0]);
+    }
+
+    /// A base camp module entry has the same shape (a decoded `RawData` beside a
+    /// `CustomVersionData` sibling), but `PalBaseCampModule` has nowhere to store
+    /// the sibling. Gating the lift on the path (not the shape) must leave it alone.
+    #[test]
+    fn a_base_camp_module_entry_keeps_its_sibling_custom_version_data() {
+        let value = prop_at(
+            "worldSaveData.BaseCampSaveData.ModuleMap",
+            r#"{"type":"MapProperty","key_type":"EnumProperty","value_type":"StructProperty",
+                "id":null,
+                "value":[{"key":"EPalBaseCampModuleType::TransportItemDirector",
+                  "value":{
+                    "RawData":{"type":"ArrayProperty","array_type":"ByteProperty","id":null,
+                      "value":{}},
+                    "CustomVersionData":{"type":"ArrayProperty","array_type":"ByteProperty",
+                      "id":null,"value":{"values":[1,0,0,0]}}}}]}"#,
+        );
+        let Property::Map(entries) = value else { panic!("expected a map") };
+        let Property::Struct(StructValue::Struct(props)) = &entries[0].value else {
+            panic!("expected a struct value");
+        };
+        assert_eq!(
+            props.0.get(&PropertyKey::from("CustomVersionData")),
+            Some(&Property::Array(ValueVec::Byte(ByteArray::Byte(vec![1, 0, 0, 0])))),
+            "a base camp module has nowhere to fold the sibling, so it must survive"
+        );
+        assert_eq!(
+            props.0.get(&PropertyKey::from("RawData")),
+            Some(&Property::Array(ValueVec::Byte(ByteArray::Byte(vec![])))),
+            "RawData must not have absorbed the sibling bytes"
+        );
+    }
+
+    /// If `RawData` is still opaque (the dialect kept its bytes rather than decoding
+    /// them), the ByteProperty arm takes the `values` branch and never looks at an
+    /// injected key. Lifting the sibling in regardless would remove it from the tree
+    /// while its bytes go nowhere. The lift must be skipped, leaving the sibling intact.
+    #[test]
+    fn a_module_entry_with_an_opaque_raw_data_keeps_its_sibling() {
+        let value = prop_at(
+            "worldSaveData.MapObjectSaveData.ConcreteModel.ModuleMap",
+            r#"{"type":"MapProperty","key_type":"EnumProperty","value_type":"StructProperty",
+                "id":null,
+                "value":[{"key":"EPalMapObjectConcreteModelModuleType::CharacterContainer",
+                  "value":{
+                    "RawData":{"type":"ArrayProperty","array_type":"ByteProperty","id":null,
+                      "value":{"values":[1,2,3,4]}},
+                    "CustomVersionData":{"type":"ArrayProperty","array_type":"ByteProperty",
+                      "id":null,"value":{"values":[1,0,0,0]}}}}]}"#,
+        );
+        let Property::Map(entries) = value else { panic!("expected a map") };
+        let Property::Struct(StructValue::Struct(props)) = &entries[0].value else {
+            panic!("expected a struct value");
+        };
+        assert_eq!(
+            props.0.get(&PropertyKey::from("CustomVersionData")),
+            Some(&Property::Array(ValueVec::Byte(ByteArray::Byte(vec![1, 0, 0, 0])))),
+            "an opaque RawData has nowhere to receive the lifted bytes, so the sibling must survive"
+        );
+        assert_eq!(
+            props.0.get(&PropertyKey::from("RawData")),
+            Some(&Property::Array(ValueVec::Byte(ByteArray::Byte(vec![1, 2, 3, 4])))),
+            "RawData's own bytes must be untouched too"
+        );
+    }
+
+    use crate::games::palworld::PalMapConcreteModelVariant;
+
+    #[test]
+    fn adapts_a_base_camp_point_concrete_model() {
+        let adapted = game_struct(
+            "worldSaveData.MapObjectSaveData.ConcreteModel.RawData",
+            r#"{"instance_id":"9f1f4b78-4df0-da8d-2e69-42b70b266f99",
+                "model_instance_id":"c57b4ddf-42a1-d22e-c831-ddac2315ea46",
+                "concrete_model_type":"PalMapObjectBaseCampPoint",
+                "leading_bytes":[0,0,0,0],
+                "base_camp_id":"c4e01fc6-3f51-477c-9338-11a15af52460",
+                "trailing_bytes":[0,0,0,0]}"#,
+        );
+        let PalStruct::MapConcreteModel(model) = adapted else { panic!("expected a concrete model") };
+        assert!(matches!(model.model_data, PalMapConcreteModelVariant::BaseCampPoint(_)));
+    }
+
+    #[test]
+    fn adapts_an_item_chest_concrete_model() {
+        let adapted = game_struct(
+            "worldSaveData.MapObjectSaveData.ConcreteModel.RawData",
+            r#"{"instance_id":"9f1f4b78-4df0-da8d-2e69-42b70b266f99",
+                "model_instance_id":"c57b4ddf-42a1-d22e-c831-ddac2315ea46",
+                "concrete_model_type":"PalMapObjectItemChestModel",
+                "leading_bytes":[0,0,0,0],
+                "private_lock_player_uid":"00000000-0000-0000-0000-000000000000",
+                "trailing_bytes":[0,0,0,0]}"#,
+        );
+        let PalStruct::MapConcreteModel(model) = adapted else { panic!("expected a concrete model") };
+        assert!(matches!(model.model_data, PalMapConcreteModelVariant::ItemChest(_)));
+    }
+
+    #[test]
+    fn adapts_an_item_chest_affect_corruption_concrete_model() {
+        let adapted = game_struct(
+            "worldSaveData.MapObjectSaveData.ConcreteModel.RawData",
+            r#"{"instance_id":"9f1f4b78-4df0-da8d-2e69-42b70b266f99",
+                "model_instance_id":"c57b4ddf-42a1-d22e-c831-ddac2315ea46",
+                "concrete_model_type":"PalMapObjectItemChest_AffectCorruption",
+                "leading_bytes":[0,0,0,0],
+                "private_lock_player_uid":"00000000-0000-0000-0000-000000000000",
+                "trailing_bytes":[0,0,0,0]}"#,
+        );
+        let PalStruct::MapConcreteModel(model) = adapted else { panic!("expected a concrete model") };
+        assert!(matches!(model.model_data, PalMapConcreteModelVariant::ItemChestAffectCorruption(_)));
+    }
+
+    #[test]
+    fn adapts_a_product_item_concrete_model() {
+        let adapted = game_struct(
+            "worldSaveData.MapObjectSaveData.ConcreteModel.RawData",
+            r#"{"instance_id":"9f1f4b78-4df0-da8d-2e69-42b70b266f99",
+                "model_instance_id":"c57b4ddf-42a1-d22e-c831-ddac2315ea46",
+                "concrete_model_type":"PalMapObjectProductItemModel",
+                "leading_bytes":[0,0,0,0],
+                "work_speed_additional_rate":1.5,
+                "product_item_id":"Wood",
+                "trailing_bytes":[0,0,0,0]}"#,
+        );
+        let PalStruct::MapConcreteModel(model) = adapted else { panic!("expected a concrete model") };
+        let PalMapConcreteModelVariant::ProductItem(product) = model.model_data else {
+            panic!("expected ProductItem");
+        };
+        assert_eq!(product.product_item_id, "Wood");
+        assert_eq!(product.work_speed_additional_rate, 1.5);
+    }
+
+    /// uesave reads a pickup guard the dialect never writes; its absence is expected.
+    #[test]
+    fn a_pickup_item_model_without_a_guard_adapts_to_none() {
+        let adapted = game_struct(
+            "worldSaveData.MapObjectSaveData.ConcreteModel.RawData",
+            r#"{"instance_id":"9f1f4b78-4df0-da8d-2e69-42b70b266f99",
+                "model_instance_id":"c57b4ddf-42a1-d22e-c831-ddac2315ea46",
+                "concrete_model_type":"PalMapObjectPickupItemOnLevelModel",
+                "auto_picked_up":true}"#,
+        );
+        let PalStruct::MapConcreteModel(model) = adapted else { panic!("expected a concrete model") };
+        let PalMapConcreteModelVariant::PickupItemOnLevel(pickup) = model.model_data else {
+            panic!("expected PickupItemOnLevel");
+        };
+        assert_eq!(pickup.auto_picked_up, 1, "the dialect writes a bool where uesave keeps a u32");
+        assert!(pickup.pickup_guard.is_none(), "the dialect writes no pickup guard");
+    }
+
+    /// The dialect misspells this field; uesave's `DropItem` struct spells it
+    /// correctly, so the dialect's key must be read and reassigned.
+    #[test]
+    fn adapts_a_drop_item_concrete_model_from_the_misspelled_player_uid() {
+        let adapted = game_struct(
+            "worldSaveData.MapObjectSaveData.ConcreteModel.RawData",
+            r#"{"instance_id":"9f1f4b78-4df0-da8d-2e69-42b70b266f99",
+                "model_instance_id":"c57b4ddf-42a1-d22e-c831-ddac2315ea46",
+                "concrete_model_type":"PalMapObjectDropItemModel",
+                "auto_picked_up":true,
+                "pickupdable_player_uid":"c4e01fc6-3f51-477c-9338-11a15af52460",
+                "remove_pickup_guard_timer_handle":0,
+                "item_id":{"static_id":"Wood",
+                    "dynamic_id":{"created_world_id":"00000000-0000-0000-0000-000000000000",
+                        "local_id_in_created_world":"00000000-0000-0000-0000-000000000000"}},
+                "trailing_bytes":[0,0,0,0]}"#,
+        );
+        let PalStruct::MapConcreteModel(model) = adapted else { panic!("expected a concrete model") };
+        let PalMapConcreteModelVariant::DropItem(drop) = model.model_data else {
+            panic!("expected DropItem");
+        };
+        assert_eq!(drop.auto_picked_up, 1, "the dialect writes a bool where uesave keeps a u32");
+        assert_eq!(
+            drop.pickupable_player_uid,
+            FGuid::parse_str("c4e01fc6-3f51-477c-9338-11a15af52460").unwrap()
+        );
+        assert_eq!(drop.item_id.static_id, "Wood");
+    }
+
+    /// The dialect misspells this field the same way uesave's own `PalEgg` struct
+    /// does, so here (unlike `DropItem`) no rename is needed: the dialect's key
+    /// already matches the struct field's name.
+    #[test]
+    fn adapts_a_pal_egg_concrete_model_from_the_misspelled_player_uid() {
+        let adapted = game_struct(
+            "worldSaveData.MapObjectSaveData.ConcreteModel.RawData",
+            r#"{"instance_id":"9f1f4b78-4df0-da8d-2e69-42b70b266f99",
+                "model_instance_id":"c57b4ddf-42a1-d22e-c831-ddac2315ea46",
+                "concrete_model_type":"PalMapObjectPalEggModel",
+                "auto_picked_up":true,
+                "pickupdable_player_uid":"c4e01fc6-3f51-477c-9338-11a15af52460",
+                "remove_pickup_guard_timer_handle":0}"#,
+        );
+        let PalStruct::MapConcreteModel(model) = adapted else { panic!("expected a concrete model") };
+        let PalMapConcreteModelVariant::PalEgg(egg) = model.model_data else {
+            panic!("expected PalEgg");
+        };
+        assert_eq!(egg.auto_picked_up, 1, "the dialect writes a bool where uesave keeps a u32");
+        assert_eq!(
+            egg.pickupdable_player_uid,
+            FGuid::parse_str("c4e01fc6-3f51-477c-9338-11a15af52460").unwrap()
+        );
+    }
+
+    #[test]
+    fn adapts_a_torch_concrete_model() {
+        let adapted = game_struct(
+            "worldSaveData.MapObjectSaveData.ConcreteModel.RawData",
+            r#"{"instance_id":"1821dedc-456d-91c3-4151-b4b7bf25640a",
+                "model_instance_id":"dcf69e1d-4a21-f37f-530b-12b577c9f3ff",
+                "concrete_model_type":"PalMapObjectTorchModel",
+                "ignition_minutes":0,
+                "extinction_date_time":53274670000000,
+                "trailing_bytes":[0,0,0,0]}"#,
+        );
+        let PalStruct::MapConcreteModel(model) = adapted else { panic!("expected a concrete model") };
+        let PalMapConcreteModelVariant::Torch(torch) = model.model_data else {
+            panic!("expected Torch");
+        };
+        assert_eq!(torch.ignition_minutes, 0);
+        assert_eq!(torch.extinction_date_time, 53274670000000);
+    }
+
+    #[test]
+    fn adapts_a_convert_item_concrete_model() {
+        let adapted = game_struct(
+            "worldSaveData.MapObjectSaveData.ConcreteModel.RawData",
+            r#"{"instance_id":"acce5d38-4f7b-05ee-5340-7abef21c0074",
+                "model_instance_id":"fc0d5e40-45be-2773-eb0c-9ca12409c28a",
+                "concrete_model_type":"PalMapObjectConvertItemModel",
+                "leading_bytes":[0,0,0,0],
+                "current_recipe_id":"None",
+                "requested_product_num":0,
+                "remain_product_num":0,
+                "work_speed_additional_rate":1.5,
+                "trailing_bytes":[0,0,0,0,0,0,0,0]}"#,
+        );
+        let PalStruct::MapConcreteModel(model) = adapted else { panic!("expected a concrete model") };
+        let PalMapConcreteModelVariant::ConvertItem(convert) = model.model_data else {
+            panic!("expected ConvertItem");
+        };
+        assert_eq!(convert.current_recipe_id, "None");
+        assert_eq!(convert.work_speed_additional_rate, 1.5);
+        assert_eq!(convert.requested_product_num, 0);
+        assert_eq!(convert.remain_product_num, 0);
+    }
+
+    #[test]
+    fn adapts_a_farm_block_v2_concrete_model() {
+        let adapted = game_struct(
+            "worldSaveData.MapObjectSaveData.ConcreteModel.RawData",
+            r#"{"instance_id":"28bc66ab-4c0e-da49-da31-23ad7a2e6add",
+                "model_instance_id":"af9d5b90-4676-8c7b-2880-95943cc3c570",
+                "concrete_model_type":"PalMapObjectFarmBlockV2Model",
+                "crop_progress_rate":0.0,
+                "crop_data_id":"Berries",
+                "current_state":4,
+                "crop_progress_rate_value":0.4391110837459564,
+                "water_stack_rate_value":0.0,
+                "state_machine":{"growup_required_time":180.0,"growup_progress_time":0.0},
+                "trailing_bytes":[0,0,0,0,0,0,0,0]}"#,
+        );
+        let PalStruct::MapConcreteModel(model) = adapted else { panic!("expected a concrete model") };
+        let PalMapConcreteModelVariant::FarmBlockV2(farm) = model.model_data else {
+            panic!("expected FarmBlockV2");
+        };
+        assert_eq!(farm.crop_data_id, "Berries");
+        assert_eq!(farm.current_state, 4);
+        assert_eq!(farm.crop_progress_rate_value, 0.4391110837459564);
+        assert_eq!(farm.state_machine.growup_required_time, 180.0);
+        assert_eq!(farm.state_machine.growup_progress_time, 0.0);
+    }
+
+    /// The dialect spells this field `consume_energy_speed`; uesave's struct spells
+    /// the same field `consume_energy_amount`, so the dialect's key must be read and
+    /// reassigned.
+    #[test]
+    fn adapts_a_generate_energy_concrete_model_from_the_renamed_consume_field() {
+        let adapted = game_struct(
+            "worldSaveData.MapObjectSaveData.ConcreteModel.RawData",
+            r#"{"instance_id":"91419bd8-4b4d-a9ab-9ff3-669f9d80b7e3",
+                "model_instance_id":"9b47d440-4faa-0656-9a8a-c597debe30cb",
+                "concrete_model_type":"PalMapObjectGenerateEnergyModel",
+                "generate_energy_rate_by_worker":0.0,
+                "stored_energy_amount":250000.0,
+                "consume_energy_speed":0.0}"#,
+        );
+        let PalStruct::MapConcreteModel(model) = adapted else { panic!("expected a concrete model") };
+        let PalMapConcreteModelVariant::GenerateEnergy(generator) = model.model_data else {
+            panic!("expected GenerateEnergy");
+        };
+        assert_eq!(generator.stored_energy_amount, 250000.0);
+        assert_eq!(generator.consume_energy_amount, 0.0);
+        assert_eq!(generator.generate_energy_rate_by_worker, 0.0);
+    }
+
+    /// A model type the dialect did not decode keeps the generic shape.
+    #[test]
+    fn an_unrecognized_concrete_model_type_adapts_to_unknown() {
+        let adapted = game_struct(
+            "worldSaveData.MapObjectSaveData.ConcreteModel.RawData",
+            r#"{"instance_id":"9f1f4b78-4df0-da8d-2e69-42b70b266f99",
+                "model_instance_id":"c57b4ddf-42a1-d22e-c831-ddac2315ea46",
+                "concrete_model_type":"PalMapObjectSomethingNewModel",
+                "trailing_bytes":[0,0,0,0]}"#,
+        );
+        let PalStruct::MapConcreteModel(model) = adapted else { panic!("expected a concrete model") };
+        assert!(matches!(model.model_data, PalMapConcreteModelVariant::Unknown(_)));
+    }
+
+    /// `BaseModel` only carries `trailing_bytes`; a field-structured dialect payload
+    /// for an unwired type must not be waved through and silently dropped.
+    #[test]
+    fn an_unrecognized_concrete_model_type_with_extra_fields_errs() {
+        let value: serde_json::Value = serde_json::from_str(
+            r#"{"instance_id":"9f1f4b78-4df0-da8d-2e69-42b70b266f99",
+                "model_instance_id":"c57b4ddf-42a1-d22e-c831-ddac2315ea46",
+                "concrete_model_type":"PalMapObjectSomethingNewModel",
+                "work_speed_additional_rate":1.5,
+                "trailing_bytes":[0,0,0,0]}"#,
+        )
+        .unwrap();
+        let error = Palworld::game_struct_from_gvas_json(
+            "worldSaveData.MapObjectSaveData.ConcreteModel.RawData",
+            &value,
+        )
+        .expect_err("unrecognized fields must error");
+        let Error::GvasJson { path, message } = error else { panic!("expected a GvasJson error") };
+        assert_eq!(path, "worldSaveData.MapObjectSaveData.ConcreteModel.RawData");
+        assert!(message.contains("work_speed_additional_rate"), "message was: {message}");
+    }
+
+    /// The dialect sometimes splits a catch-all model's raw tail across two keys where
+    /// uesave's binary reader takes one continuous run; the two must concatenate in
+    /// wire order rather than erroring as an unrecognized field.
+    #[test]
+    fn an_unrecognized_concrete_model_type_concatenates_the_split_trailing_bytes() {
+        let adapted = game_struct(
+            "worldSaveData.MapObjectSaveData.ConcreteModel.RawData",
+            r#"{"instance_id":"a21372f8-17a2-40ce-ba62-fdf53af20423",
+                "model_instance_id":"d3ae265c-66f6-43f8-8139-17adce497235",
+                "concrete_model_type":"PalMapObjectLampModel",
+                "trailing_bytes":[0,0,0,0],
+                "trailing_unknown_bytes":[0,0,0,0,0,0,0,0]}"#,
+        );
+        let PalStruct::MapConcreteModel(model) = adapted else { panic!("expected a concrete model") };
+        let PalMapConcreteModelVariant::Unknown(base) = model.model_data else {
+            panic!("expected the generic Unknown shape");
+        };
+        assert_eq!(base.trailing_bytes, vec![0u8; 12]);
+    }
+
+    /// A model type with no dedicated struct on either side carries its raw tail as
+    /// `unknown_bytes` instead of `trailing_bytes`.
+    #[test]
+    fn an_unrecognized_concrete_model_type_reads_unknown_bytes_as_the_trailing_run() {
+        let adapted = game_struct(
+            "worldSaveData.MapObjectSaveData.ConcreteModel.RawData",
+            r#"{"instance_id":"b617bfde-4d74-040c-73ca-d18d1aebb454",
+                "model_instance_id":"75ad2398-4ea0-6027-f600-f9be1af3ed2d",
+                "concrete_model_type":"PalMapObjectMultiHatchingEggModel",
+                "unknown_bytes":[0,0,0,0,0,0,0,0,0,0,0,0]}"#,
+        );
+        let PalStruct::MapConcreteModel(model) = adapted else { panic!("expected a concrete model") };
+        let PalMapConcreteModelVariant::Unknown(base) = model.model_data else {
+            panic!("expected the generic Unknown shape");
+        };
+        assert_eq!(base.trailing_bytes, vec![0u8; 12]);
+    }
+
+    #[test]
+    fn adapts_an_energy_storage_concrete_model() {
+        let adapted = game_struct(
+            "worldSaveData.MapObjectSaveData.ConcreteModel.RawData",
+            r#"{"instance_id":"50922270-ade7-458c-946a-f3e54812d6aa",
+                "model_instance_id":"eb6035d0-7cf0-4eda-8d90-813776b273a6",
+                "concrete_model_type":"PalMapObjectEnergyStorageModel",
+                "stored_energy_amount":0.0,
+                "trailing_bytes":[255,132,207,73,0,0,0,0]}"#,
+        );
+        let PalStruct::MapConcreteModel(model) = adapted else { panic!("expected a concrete model") };
+        let PalMapConcreteModelVariant::EnergyStorage(storage) = model.model_data else {
+            panic!("expected EnergyStorage");
+        };
+        assert_eq!(storage.trailing_bytes, [255, 132, 207, 73, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn adapts_a_signboard_concrete_model() {
+        let adapted = game_struct(
+            "worldSaveData.MapObjectSaveData.ConcreteModel.RawData",
+            r#"{"instance_id":"c8dfcfb3-d6d6-4a81-90dc-48c9433eab87",
+                "model_instance_id":"9e22e572-4061-4c4b-ae70-be90bbe8ee7c",
+                "concrete_model_type":"PalMapObjectSignboardModel",
+                "leading_bytes":[0,0,0,0],
+                "signboard_text":"<blue>Encubadoras</>\r\n<blue>de Ovos</>",
+                "last_modified_player_uid":"00000000-0000-0000-0000-000000000001",
+                "trailing_bytes":[0,0,0,0]}"#,
+        );
+        let PalStruct::MapConcreteModel(model) = adapted else { panic!("expected a concrete model") };
+        let PalMapConcreteModelVariant::Signboard(sign) = model.model_data else {
+            panic!("expected Signboard");
+        };
+        assert_eq!(sign.signboard_text, "<blue>Encubadoras</>\r\n<blue>de Ovos</>");
+    }
+
+    #[test]
+    fn adapts_a_defense_bullet_launcher_concrete_model() {
+        let adapted = game_struct(
+            "worldSaveData.MapObjectSaveData.ConcreteModel.RawData",
+            r#"{"instance_id":"7e8b4b51-4cb0-bac3-490e-0fa0ed83a78a",
+                "model_instance_id":"3e5838df-46ba-b8cb-5be0-fdbd5c52efeb",
+                "concrete_model_type":"PalMapObjectDefenseBulletLauncherModel",
+                "leading_bytes":[0,0,0,0],
+                "remaining_bullets":0,
+                "magazine_size":200,
+                "bullet_item_name":"RifleBullet",
+                "trailing_bytes":[0,0,0,0]}"#,
+        );
+        let PalStruct::MapConcreteModel(model) = adapted else { panic!("expected a concrete model") };
+        let PalMapConcreteModelVariant::DefenseBulletLauncher(launcher) = model.model_data else {
+            panic!("expected DefenseBulletLauncher");
+        };
+        assert_eq!(launcher.bullet_item_name, "RifleBullet");
+        assert_eq!(launcher.magazine_size, 200);
+    }
+
+    /// `Properties<T>`'s own `Deserialize` impl needs a schema-aware context a bare
+    /// `serde_json::from_value` never establishes, so this field is built through the
+    /// property-tree walker instead (same pattern as `character_data`).
+    #[test]
+    fn adapts_a_hatching_egg_concrete_model_with_an_empty_save_parameter() {
+        let adapted = game_struct(
+            "worldSaveData.MapObjectSaveData.ConcreteModel.RawData",
+            r#"{"instance_id":"0b958946-48e3-f56a-bc05-c9a6132ce9fa",
+                "model_instance_id":"fd71698d-4da9-4a90-b8d5-dfb6b382885c",
+                "concrete_model_type":"PalMapObjectHatchingEggModel",
+                "leading_bytes":[0,0,0,0],
+                "hatched_character_save_parameter":{},
+                "current_pal_egg_temp_diff":0,
+                "hatched_character_guid":"00000000-0000-0000-0000-000000000000",
+                "trailing_bytes":[0,0,0,0]}"#,
+        );
+        let PalStruct::MapConcreteModel(model) = adapted else { panic!("expected a concrete model") };
+        let PalMapConcreteModelVariant::HatchingEgg(egg) = model.model_data else {
+            panic!("expected HatchingEgg");
+        };
+        assert_eq!(egg.current_pal_egg_temp_diff, 0);
+        assert!(egg.hatched_character_save_parameter.0.is_empty());
+    }
+
+    #[test]
+    fn adapts_a_breed_farm_concrete_model_with_no_spawned_eggs() {
+        let adapted = game_struct(
+            "worldSaveData.MapObjectSaveData.ConcreteModel.RawData",
+            r#"{"instance_id":"14880031-4ee5-7009-378d-0dbf03e0bdf0",
+                "model_instance_id":"cb90d832-4af1-f9bb-df68-13b16ff246f3",
+                "concrete_model_type":"PalMapObjectBreedFarmModel",
+                "leading_bytes":[0,0,0,0],
+                "spawned_egg_instance_ids":[],
+                "trailing_bytes":[0,0,0,0]}"#,
+        );
+        let PalStruct::MapConcreteModel(model) = adapted else { panic!("expected a concrete model") };
+        let PalMapConcreteModelVariant::BreedFarm(farm) = model.model_data else {
+            panic!("expected BreedFarm");
+        };
+        assert!(farm.spawned_egg_instance_ids.is_empty());
+        assert!(farm.breeding.is_none());
+    }
+
+    /// The dialect has no field of its own for the optional `breeding` block; when
+    /// present its bytes arrive as `trailing_unknown_bytes` and must be decoded with
+    /// uesave's own reader.
+    #[test]
+    fn adapts_a_breed_farm_concrete_model_decoding_breeding_from_trailing_unknown_bytes() {
+        let adapted = game_struct(
+            "worldSaveData.MapObjectSaveData.ConcreteModel.RawData",
+            r#"{"instance_id":"bc670f6e-d399-479a-bef5-23ab1e284748",
+                "model_instance_id":"09fcd54d-1d16-490a-b88c-123b34edd10e",
+                "concrete_model_type":"PalMapObjectBreedFarmModel",
+                "leading_bytes":[0,0,0,0],
+                "spawned_egg_instance_ids":[],
+                "trailing_bytes":[0,0,0,0],
+                "trailing_unknown_bytes":[0,0,0,0,0,0,0,0]}"#,
+        );
+        let PalStruct::MapConcreteModel(model) = adapted else { panic!("expected a concrete model") };
+        let PalMapConcreteModelVariant::BreedFarm(farm) = model.model_data else {
+            panic!("expected BreedFarm");
+        };
+        let breeding = farm.breeding.expect("breeding decoded from trailing_unknown_bytes");
+        assert!(breeding.last_proceed_worker_individual_ids.is_empty());
+        assert!(breeding.target_breed_item_ids.is_empty());
+    }
+
+    use crate::games::palworld::PalDynamicItemType;
+
+    #[test]
+    fn adapts_character_data_with_its_nested_object() {
+        let adapted = game_struct(
+            "worldSaveData.CharacterSaveParameterMap.RawData",
+            r#"{"group_id":"9d2ae570-428b-4517-4df1-68b7ed01dd4b",
+                "object":{"SaveParameter":{"type":"StructProperty","struct_type":"PalIndividualCharacterSaveParameter",
+                    "struct_id":"00000000-0000-0000-0000-000000000000","id":null,
+                    "value":{"Level":{"type":"IntProperty","value":12,"id":null}}}},
+                "trailing_bytes":[0,0,0,0],"unknown_bytes":[0,0,0,0]}"#,
+        );
+        let PalStruct::CharacterData(character) = adapted else { panic!("expected CharacterData") };
+        let Some(Property::Struct(StructValue::Struct(save_parameter))) =
+            character.object.0.get(&PropertyKey::from("SaveParameter"))
+        else {
+            panic!("expected a nested SaveParameter struct");
+        };
+        assert_eq!(save_parameter.0.get(&PropertyKey::from("Level")), Some(&Property::Int(12)));
+    }
+
+    /// The corpus nests `static_id` inside `id`, matching the dialect; uesave splits
+    /// it into a sibling field on `PalDynamicItem`.
+    #[test]
+    fn adapts_a_dynamic_item() {
+        let adapted = game_struct(
+            "worldSaveData.DynamicItemSaveData.RawData",
+            r#"{"id":{"created_world_id":"00000000-0000-0000-0000-000000000000",
+                     "local_id_in_created_world":"723a35bf-4a5a-c811-f04e-79b613ac7529",
+                     "static_id":"Handgun"},
+                "type":"weapon","durability":100.0,"remaining_bullets":7,
+                "passive_skill_list":[],
+                "leading_bytes":[0,0,0,0],"trailing_bytes":[0,0,0,0]}"#,
+        );
+        let PalStruct::DynamicItem(item) = adapted else { panic!("expected DynamicItem") };
+        assert_eq!(item.static_id, "Handgun");
+        let PalDynamicItemType::Weapon { durability, remaining_bullets, unknown_str, .. } =
+            &item.item_type
+        else {
+            panic!("expected Weapon");
+        };
+        assert_eq!(*durability, 100.0);
+        assert_eq!(*remaining_bullets, 7);
+        assert!(unknown_str.is_none());
+    }
+
+    #[test]
+    fn adapts_an_armor_dynamic_item() {
+        let adapted = game_struct(
+            "worldSaveData.DynamicItemSaveData.RawData",
+            r#"{"id":{"created_world_id":"00000000-0000-0000-0000-000000000000",
+                     "local_id_in_created_world":"8ea7c9cf-97b6-4b55-8570-7a6372f2d4a0",
+                     "static_id":"LeatherArmor"},
+                "type":"armor","durability":80.0,
+                "leading_bytes":[0,0,0,0],"trailing_bytes":[0,0,0,0]}"#,
+        );
+        let PalStruct::DynamicItem(item) = adapted else { panic!("expected DynamicItem") };
+        assert_eq!(item.static_id, "LeatherArmor");
+        let PalDynamicItemType::Armor { durability, .. } = item.item_type else {
+            panic!("expected Armor");
+        };
+        assert_eq!(durability, 80.0);
+    }
+
+    /// Real corpus bytes for a post-update weapon: the dialect's `trailing_bytes` is the
+    /// FString length prefix for the FName "None", and the true trailing bytes hide
+    /// inside `unknown_bytes`. Recovering them must produce the same typed `Weapon`
+    /// uesave's own binary reader would, so an item's representation does not depend
+    /// on whether it came from a real save or this JSON dialect.
+    #[test]
+    fn adapts_a_post_update_weapon_by_recovering_its_fstring() {
+        let adapted = game_struct(
+            "worldSaveData.DynamicItemSaveData.RawData",
+            r#"{"id":{"created_world_id":"00000000-0000-0000-0000-000000000000",
+                     "local_id_in_created_world":"8ea7c9cf-97b6-4b55-8570-7a6372f2d4a0",
+                     "static_id":"Pickaxe_Steal"},
+                "type":"weapon","durability":100.0,"remaining_bullets":0,
+                "passive_skill_list":[],
+                "leading_bytes":[0,0,0,0],
+                "trailing_bytes":[5,0,0,0],
+                "unknown_bytes":[78,111,110,101,0,0,0,0,0]}"#,
+        );
+        let PalStruct::DynamicItem(item) = adapted else { panic!("expected DynamicItem") };
+        let PalDynamicItemType::Weapon { unknown_str, trailing_bytes, .. } = item.item_type else {
+            panic!("expected Weapon");
+        };
+        assert_eq!(unknown_str, Some("None".to_string()));
+        assert_eq!(trailing_bytes, [0, 0, 0, 0]);
+    }
+
+    /// A trailer that does not decode as a plausible FString followed by exactly 4
+    /// trailing bytes must fall back to `Unknown` with the bytes reassembled in their
+    /// original order, rather than guessing and silently corrupting the item.
+    #[test]
+    fn a_malformed_weapon_trailer_falls_back_to_unknown() {
+        let adapted = game_struct(
+            "worldSaveData.DynamicItemSaveData.RawData",
+            r#"{"id":{"created_world_id":"00000000-0000-0000-0000-000000000000",
+                     "local_id_in_created_world":"00000000-0000-0000-0000-000000000000",
+                     "static_id":"Weird"},
+                "type":"weapon","durability":50.0,"remaining_bullets":3,
+                "passive_skill_list":[],
+                "leading_bytes":[1,2,3,4],
+                "trailing_bytes":[255,255,255,127],
+                "unknown_bytes":[9,9,9,9]}"#,
+        );
+        let PalStruct::DynamicItem(item) = adapted else { panic!("expected DynamicItem") };
+        let PalDynamicItemType::Unknown { trailer } = item.item_type else {
+            panic!("expected a fallback to Unknown");
+        };
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&[1, 2, 3, 4]);
+        expected.extend_from_slice(&50.0f32.to_le_bytes());
+        expected.extend_from_slice(&3i32.to_le_bytes());
+        expected.extend_from_slice(&0u32.to_le_bytes());
+        expected.extend_from_slice(&[255, 255, 255, 127]);
+        expected.extend_from_slice(&[9, 9, 9, 9]);
+        assert_eq!(trailer, expected);
+    }
+
+    /// The recovered FString's UTF-16 branch: a plausible non-ASCII trailer, negative
+    /// length prefix and all, must decode to the same string uesave's own FString
+    /// reader would produce, not just the ASCII fast path.
+    #[test]
+    fn recovers_a_non_ascii_fstring_from_a_weapon_trailer() {
+        let adapted = game_struct(
+            "worldSaveData.DynamicItemSaveData.RawData",
+            r#"{"id":{"created_world_id":"00000000-0000-0000-0000-000000000000",
+                     "local_id_in_created_world":"00000000-0000-0000-0000-000000000000",
+                     "static_id":"Weird"},
+                "type":"weapon","durability":100.0,"remaining_bullets":0,
+                "passive_skill_list":[],
+                "leading_bytes":[0,0,0,0],
+                "trailing_bytes":[254,255,255,255],
+                "unknown_bytes":[233,0,0,0,1,2,3,4]}"#,
+        );
+        let PalStruct::DynamicItem(item) = adapted else { panic!("expected DynamicItem") };
+        let PalDynamicItemType::Weapon { unknown_str, trailing_bytes, .. } = item.item_type else {
+            panic!("expected Weapon");
+        };
+        assert_eq!(unknown_str, Some("\u{e9}".to_string()));
+        assert_eq!(trailing_bytes, [1, 2, 3, 4]);
+    }
+
+    /// The fallback trailer's own FString encoder: a non-ASCII passive skill name
+    /// must round-trip through the same negative-length UTF-16 encoding uesave's own
+    /// writer would use, not just the ASCII fast path.
+    #[test]
+    fn a_fallback_trailer_encodes_a_non_ascii_passive_skill() {
+        let adapted = game_struct(
+            "worldSaveData.DynamicItemSaveData.RawData",
+            r#"{"id":{"created_world_id":"00000000-0000-0000-0000-000000000000",
+                     "local_id_in_created_world":"00000000-0000-0000-0000-000000000000",
+                     "static_id":"Weird"},
+                "type":"weapon","durability":50.0,"remaining_bullets":3,
+                "passive_skill_list":["é"],
+                "leading_bytes":[1,2,3,4],
+                "trailing_bytes":[255,255,255,127],
+                "unknown_bytes":[9,9,9,9]}"#,
+        );
+        let PalStruct::DynamicItem(item) = adapted else { panic!("expected DynamicItem") };
+        let PalDynamicItemType::Unknown { trailer } = item.item_type else {
+            panic!("expected a fallback to Unknown");
+        };
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&[1, 2, 3, 4]);
+        expected.extend_from_slice(&50.0f32.to_le_bytes());
+        expected.extend_from_slice(&3i32.to_le_bytes());
+        expected.extend_from_slice(&1u32.to_le_bytes());
+        // "é" encoded as a negative-length, null-terminated UTF-16 FString.
+        expected.extend_from_slice(&(-2i32).to_le_bytes());
+        expected.extend_from_slice(&0x00e9u16.to_le_bytes());
+        expected.extend_from_slice(&[0, 0]);
+        expected.extend_from_slice(&[255, 255, 255, 127]);
+        expected.extend_from_slice(&[9, 9, 9, 9]);
+        assert_eq!(trailer, expected);
+    }
+
+    /// An unrecognized `type` (here `egg`, a shape this adapter does not implement)
+    /// must error naming its fields rather than silently becoming a default.
+    #[test]
+    fn an_unrecognized_dynamic_item_type_errs() {
+        let value: serde_json::Value = serde_json::from_str(
+            r#"{"id":{"created_world_id":"00000000-0000-0000-0000-000000000000",
+                     "local_id_in_created_world":"00000000-0000-0000-0000-000000000000",
+                     "static_id":"Egg"},
+                "type":"egg","character_id":"SomePal","leading_bytes":[0,0,0,0]}"#,
+        )
+        .unwrap();
+        let error =
+            Palworld::game_struct_from_gvas_json("worldSaveData.DynamicItemSaveData.RawData", &value)
+                .expect_err("unrecognized fields must error");
+        let Error::GvasJson { path, message } = error else { panic!("expected a GvasJson error") };
+        assert_eq!(path, "worldSaveData.DynamicItemSaveData.RawData");
+        assert!(message.contains("character_id"), "message was: {message}");
+    }
+
+    use crate::games::palworld::{PalWork, PalWorkTypeSpecificData};
+
+    /// Every work payload below is a real dict from the sample corpus, one per
+    /// `WorkableType` the corpus exercises.
+    fn work_from(json: &str) -> PalWork {
+        let adapted = game_struct("worldSaveData.WorkSaveData.RawData", json);
+        let PalStruct::Work(work) = adapted else { panic!("expected Work") };
+        *work
+    }
+
+    /// The flat dict splits into a base, a transform and a type-specific payload, and
+    /// the three bools the dialect writes for `u32` fields come back as `u32`s.
+    #[test]
+    fn adapts_a_progress_work_splitting_the_flat_dialect_dict() {
+        let work = work_from(
+            r#"{"id":"b38e2281-f228-44bc-992f-d9268cd0799b",
+                "workable_bounds":{"location":{"x":0.0,"y":0.0,"z":250.0},
+                    "rotation":{"x":0.0,"y":-0.0,"z":0.0,"w":1.0},
+                    "box_sphere_bounds":{"origin":{"x":0.0,"y":0.0,"z":0.0},
+                        "box_extent":{"x":400.0,"y":400.0,"z":250.0},
+                        "sphere_radius":618.4658438426491}},
+                "base_camp_id_belong_to":"16a18bfe-f989-4d61-ae64-061de5eb1b09",
+                "owner_map_object_model_id":"f4cb4274-5066-4681-8a72-01c5ae137a45",
+                "owner_map_object_concrete_model_id":"8d46db52-67f6-4aba-9c0e-1df40a3a15d0",
+                "current_state":1,"assign_locations":[],"behaviour_type":0,
+                "assign_define_data_id":"OilPump_0","override_work_type":0,
+                "assignable_fixed_type":0,
+                "assignable_otomo":true,"can_trigger_worker_event":true,
+                "can_steal_assign":true,
+                "required_work_amount":0.0,"current_work_amount":2000.0,
+                "work_exp":0,"work_exp_calc_type":0,
+                "auto_work_self_amount_by_sec":1428.32470703125,
+                "progress_time_since_last_tick":30.0,"tick_process_min_interval":0.0,
+                "transform":{"type":2,
+                    "map_object_instance_id":"f4cb4274-5066-4681-8a72-01c5ae137a45",
+                    "trailing_bytes":[0,0,0,0,0,0,0,0]}}"#,
+        );
+        assert_eq!(work.work_type, "", "the sibling WorkableType is re-attached by the caller");
+
+        let base = work.base_data.as_ref().expect("the flat dict carries base data");
+        assert_eq!(base.assign_define_data_id, "OilPump_0");
+        assert_eq!(base.workable_bounds.box_sphere_bounds.sphere_radius, 618.4658438426491);
+        assert_eq!(base.assignable_otomo, 1, "the dialect writes a bool; uesave keeps a u32");
+        assert_eq!(base.can_trigger_worker_event, 1);
+        assert_eq!(base.can_steal_assign, 1);
+
+        let transform = work.transform.as_ref().expect("a type-2 transform is carried");
+        assert_eq!(transform.transform_type, 2);
+        assert_eq!(
+            transform.map_object_instance_id,
+            Some(FGuid::parse_str("f4cb4274-5066-4681-8a72-01c5ae137a45").unwrap())
+        );
+        assert_eq!(transform.trailing_bytes, Some([0; 8]));
+
+        let PalWorkTypeSpecificData::Progress {
+            current_work_amount,
+            auto_work_self_amount_by_sec,
+            progress_time_since_last_tick,
+            ..
+        } = work.work_specific_data
+        else {
+            panic!("expected Progress");
+        };
+        assert_eq!(current_work_amount, 2000.0);
+        assert_eq!(auto_work_self_amount_by_sec, 1428.324_7);
+        assert_eq!(progress_time_since_last_tick, 30.0);
+    }
+
+    /// `OnlyJoin` carries nothing past the base but a work amount, which uesave reads
+    /// as the `SimpleWork` variant.
+    #[test]
+    fn adapts_an_only_join_work_as_simple_work() {
+        let work = work_from(
+            r#"{"id":"3c926ece-a73d-4f9e-ab5d-02145e823c70",
+                "workable_bounds":{"location":{"x":0.0,"y":0.0,"z":22.5},
+                    "rotation":{"x":0.0,"y":-0.0,"z":0.0,"w":1.0},
+                    "box_sphere_bounds":{"origin":{"x":0.0,"y":0.0,"z":0.0},
+                        "box_extent":{"x":100.0,"y":100.0,"z":22.5},
+                        "sphere_radius":143.20003491619687}},
+                "base_camp_id_belong_to":"16a18bfe-f989-4d61-ae64-061de5eb1b09",
+                "owner_map_object_model_id":"42b314b6-8f77-407e-b0af-0bbdb3de26ab",
+                "owner_map_object_concrete_model_id":"ac2b507e-4415-4303-ba35-df4c3e26c4d1",
+                "current_state":1,"assign_locations":[],"behaviour_type":0,
+                "assign_define_data_id":"CoolerPalFoodBox_0","override_work_type":0,
+                "assignable_fixed_type":0,
+                "assignable_otomo":true,"can_trigger_worker_event":true,
+                "can_steal_assign":true,"required_work_amount":0.0,
+                "transform":{"type":2,
+                    "map_object_instance_id":"42b314b6-8f77-407e-b0af-0bbdb3de26ab",
+                    "trailing_bytes":[0,0,0,0,0,0,0,0]}}"#,
+        );
+        let base = work.base_data.as_ref().expect("base data");
+        assert_eq!(base.assign_define_data_id, "CoolerPalFoodBox_0");
+        assert_eq!(work.transform.map(|t| t.transform_type), Some(2));
+        assert_eq!(
+            work.work_specific_data,
+            PalWorkTypeSpecificData::SimpleWork { required_work_amount: 0.0 }
+        );
+    }
+
+    /// `Progress_MultiType` is the one work type the dialect stops decoding early: it
+    /// keeps the whole run past the progress fields raw in `multi_tail` and emits no
+    /// sibling `transform`. Decoding that run must produce the same progress entries,
+    /// suitability entries and transform uesave's own binary reader would, so a work's
+    /// representation does not depend on which side it was read from.
+    #[test]
+    fn adapts_a_progress_multi_type_work_from_its_raw_tail() {
+        let work = work_from(
+            r#"{"id":"c4957227-428b-364b-0ffc-c4aaa60f091c",
+                "workable_bounds":{"location":{"x":0.0,"y":0.0,"z":50.0},
+                    "rotation":{"x":0.0,"y":-0.0,"z":0.0,"w":1.0},
+                    "box_sphere_bounds":{"origin":{"x":0.0,"y":0.0,"z":0.0},
+                        "box_extent":{"x":120.0,"y":180.0,"z":47.5},
+                        "sphere_radius":221.48645556782924}},
+                "base_camp_id_belong_to":"16a18bfe-f989-4d61-ae64-061de5eb1b09",
+                "owner_map_object_model_id":"306ae54d-329e-48a5-ba28-a8a50e202237",
+                "owner_map_object_concrete_model_id":"6c388cac-cb5a-40cb-b9a0-9928bf85c7c3",
+                "current_state":1,
+                "assign_locations":[
+                    {"location":{"x":85.0,"y":204.23773820483794,"z":7.389644451905042e-13},
+                     "facing_direction":{"x":1.0,"y":0.0,"z":0.0}},
+                    {"location":{"x":85.0,"y":-195.20660119221301,"z":-1.7825982467911672e-07},
+                     "facing_direction":{"x":1.0,"y":0.0,"z":0.0}}],
+                "behaviour_type":0,
+                "assign_define_data_id":"AncientBlastFurnace_0","override_work_type":0,
+                "assignable_fixed_type":0,
+                "assignable_otomo":true,"can_trigger_worker_event":true,
+                "can_steal_assign":true,
+                "required_work_amount":0.0,"current_work_amount":0.0,
+                "work_exp":0,"work_exp_calc_type":0,
+                "auto_work_self_amount_by_sec":0.0,
+                "progress_time_since_last_tick":0.0,"tick_process_min_interval":0.0,
+                "multi_tail":[2,0,0,0,1,0,0,0,0,0,0,72,66,0,0,0,0,
+                              11,0,0,0,0,0,0,72,66,0,0,0,0,
+                              0,0,0,0,
+                              2,77,229,106,48,165,72,158,50,165,168,40,186,55,34,32,14,
+                              0,0,0,0,0,0,0,0]}"#,
+        );
+        let base = work.base_data.as_ref().expect("base data");
+        assert_eq!(base.assign_define_data_id, "AncientBlastFurnace_0");
+        assert_eq!(base.assign_locations.len(), 2);
+
+        let PalWorkTypeSpecificData::ProgressMultiType {
+            progress_entries,
+            suitability_info_entries,
+            ..
+        } = &work.work_specific_data
+        else {
+            panic!("expected ProgressMultiType");
+        };
+        assert_eq!(
+            progress_entries.iter().map(|e| e.work_suitability).collect::<Vec<_>>(),
+            vec![1, 11]
+        );
+        assert!(progress_entries.iter().all(|e| e.max_progress == 50.0));
+        assert!(suitability_info_entries.is_empty());
+
+        let transform = work.transform.as_ref().expect("the transform hides in multi_tail");
+        assert_eq!(transform.transform_type, 2);
+        assert_eq!(
+            transform.map_object_instance_id,
+            Some(FGuid::parse_str("306ae54d-329e-48a5-ba28-a8a50e202237").unwrap()),
+            "the tail's transform points back at the work's own map object"
+        );
+        assert_eq!(transform.trailing_bytes, Some([0; 8]));
+    }
+
+    /// Same field set as `OnlyJoin`, and the sample that shows all three booleanized
+    /// `u32`s are not always the same value.
+    #[test]
+    fn adapts_an_only_join_and_walk_around_work() {
+        let work = work_from(
+            r#"{"id":"a93df801-879e-4b34-874e-9d5b9cba667a",
+                "workable_bounds":{
+                    "location":{"x":16.384420795031673,"y":-3.410605131648481e-13,
+                                "z":73.15610928924264},
+                    "rotation":{"x":0.0,"y":-0.0,"z":0.0,"w":1.0},
+                    "box_sphere_bounds":{"origin":{"x":0.0,"y":0.0,"z":0.0},
+                        "box_extent":{"x":127.496191,"y":148.672348,"z":69.498043},
+                        "sphere_radius":207.81896872078696}},
+                "base_camp_id_belong_to":"16a18bfe-f989-4d61-ae64-061de5eb1b09",
+                "owner_map_object_model_id":"ded6b8d7-6f39-4e61-a7bd-0cc9366da72d",
+                "owner_map_object_concrete_model_id":"5b851235-786c-41da-9ffd-ca7e43bd934a",
+                "current_state":1,"assign_locations":[],"behaviour_type":0,
+                "assign_define_data_id":"Clinic_0","override_work_type":0,
+                "assignable_fixed_type":2,
+                "assignable_otomo":false,"can_trigger_worker_event":false,
+                "can_steal_assign":true,"required_work_amount":0.0,
+                "transform":{"type":2,
+                    "map_object_instance_id":"ded6b8d7-6f39-4e61-a7bd-0cc9366da72d",
+                    "trailing_bytes":[0,0,0,0,0,0,0,0]}}"#,
+        );
+        let base = work.base_data.as_ref().expect("base data");
+        assert_eq!(base.assign_define_data_id, "Clinic_0");
+        assert_eq!(base.assignable_fixed_type, 2);
+        assert_eq!(base.assignable_otomo, 0);
+        assert_eq!(base.can_trigger_worker_event, 0);
+        assert_eq!(base.can_steal_assign, 1);
+        assert_eq!(
+            work.work_specific_data,
+            PalWorkTypeSpecificData::SimpleWork { required_work_amount: 0.0 }
+        );
+    }
+
+    /// `Defense` is the only corpus shape with its own leading and trailing bytes, and
+    /// the only one with no work amount at all.
+    #[test]
+    fn adapts_a_defense_work() {
+        let work = work_from(
+            r#"{"id":"bdad384a-4bf8-7917-19b0-e2821cdee4a0",
+                "workable_bounds":{"location":{"x":0.0,"y":0.0,"z":50.0},
+                    "rotation":{"x":0.0,"y":-0.0,"z":0.0,"w":1.0},
+                    "box_sphere_bounds":{"origin":{"x":0.0,"y":0.0,"z":0.0},
+                        "box_extent":{"x":220.0,"y":220.0,"z":47.5},
+                        "sphere_radius":314.7320288753593}},
+                "base_camp_id_belong_to":"ed321d99-47a7-20d4-5205-bca743a4b131",
+                "owner_map_object_model_id":"b2f7c483-4834-e727-6f7f-51a489eeb9ab",
+                "owner_map_object_concrete_model_id":"89515eea-4878-362a-8641-a3b65d028cb7",
+                "current_state":1,"assign_locations":[],"behaviour_type":0,
+                "assign_define_data_id":"DefenseMachinegun_0","override_work_type":24,
+                "assignable_fixed_type":2,
+                "assignable_otomo":true,"can_trigger_worker_event":true,
+                "can_steal_assign":true,
+                "leading_bytes":[0,0,0,0],"defense_combat_type":2,
+                "trailing_bytes":[0,0,0,0],
+                "transform":{"type":2,
+                    "map_object_instance_id":"b2f7c483-4834-e727-6f7f-51a489eeb9ab",
+                    "trailing_bytes":[0,0,0,0,0,0,0,0]}}"#,
+        );
+        let base = work.base_data.as_ref().expect("base data");
+        assert_eq!(base.override_work_type, 24);
+        assert_eq!(work.transform.map(|t| t.transform_type), Some(2));
+        assert_eq!(
+            work.work_specific_data,
+            PalWorkTypeSpecificData::Defense {
+                leading_bytes: [0; 4],
+                defense_combat_type: 2,
+                trailing_bytes: [0; 4],
+            },
+            "the work's own trailing bytes are not the transform's"
+        );
+    }
+
+    #[test]
+    fn adapts_a_monster_farm_work() {
+        let work = work_from(
+            r#"{"id":"e05d9dfb-f721-4a53-b438-edb25f8f5c95",
+                "workable_bounds":{"location":{"x":0.0,"y":0.0,"z":100.0},
+                    "rotation":{"x":0.0,"y":0.0,"z":-0.7071067811865477,
+                                "w":0.7071067811865475},
+                    "box_sphere_bounds":{"origin":{"x":0.0,"y":0.0,"z":0.0},
+                        "box_extent":{"x":550.0,"y":550.0,"z":100.0},
+                        "sphere_radius":784.2193570679061}},
+                "base_camp_id_belong_to":"16a18bfe-f989-4d61-ae64-061de5eb1b09",
+                "owner_map_object_model_id":"597e59bd-c6e9-473f-afb8-99feae79811d",
+                "owner_map_object_concrete_model_id":"71e76921-f89f-4a57-b417-b3380106af68",
+                "current_state":1,"assign_locations":[],"behaviour_type":0,
+                "assign_define_data_id":"MonsterFarm_0","override_work_type":0,
+                "assignable_fixed_type":0,
+                "assignable_otomo":false,"can_trigger_worker_event":false,
+                "can_steal_assign":true,"required_work_amount":0.0,
+                "transform":{"type":2,
+                    "map_object_instance_id":"597e59bd-c6e9-473f-afb8-99feae79811d",
+                    "trailing_bytes":[0,0,0,0,0,0,0,0]}}"#,
+        );
+        let base = work.base_data.as_ref().expect("base data");
+        assert_eq!(base.assign_define_data_id, "MonsterFarm_0");
+        assert_eq!(base.workable_bounds.rotation.w.0, 0.7071067811865475);
+        assert_eq!(
+            work.work_specific_data,
+            PalWorkTypeSpecificData::SimpleWork { required_work_amount: 0.0 }
+        );
+    }
+
+    #[test]
+    fn adapts_a_booth_work() {
+        let work = work_from(
+            r#"{"id":"9429e7c2-4313-f584-f885-7588b3366182",
+                "workable_bounds":{"location":{"x":-18.0,"y":0.0,"z":86.0},
+                    "rotation":{"x":0.0,"y":-0.0,"z":0.7071067811865476,
+                                "w":0.7071067811865477},
+                    "box_sphere_bounds":{"origin":{"x":0.0,"y":0.0,"z":0.0},
+                        "box_extent":{"x":183.718549,"y":211.989501,"z":59.043001},
+                        "sphere_radius":286.6672805675255}},
+                "base_camp_id_belong_to":"ed321d99-47a7-20d4-5205-bca743a4b131",
+                "owner_map_object_model_id":"04c9ece1-46d3-19ca-0403-81a425565971",
+                "owner_map_object_concrete_model_id":"8f312c4e-4278-be11-dad0-2da44c15d2bf",
+                "current_state":1,
+                "assign_locations":[
+                    {"location":{"x":-52.0,"y":0.6591444713109914,"z":57.99999973404579},
+                     "facing_direction":{"x":-1.0,"y":1.2246467991473532e-16,"z":0.0}}],
+                "behaviour_type":0,
+                "assign_define_data_id":"ItemBooth_0","override_work_type":0,
+                "assignable_fixed_type":2,
+                "assignable_otomo":false,"can_trigger_worker_event":true,
+                "can_steal_assign":true,"required_work_amount":0.0,
+                "transform":{"type":2,
+                    "map_object_instance_id":"04c9ece1-46d3-19ca-0403-81a425565971",
+                    "trailing_bytes":[0,0,0,0,0,0,0,0]}}"#,
+        );
+        let base = work.base_data.as_ref().expect("base data");
+        assert_eq!(base.assign_define_data_id, "ItemBooth_0");
+        assert_eq!(base.assign_locations.len(), 1);
+        assert_eq!(base.assign_locations[0].location.x.0, -52.0);
+        assert_eq!(base.can_trigger_worker_event, 1);
+        assert_eq!(
+            work.work_specific_data,
+            PalWorkTypeSpecificData::SimpleWork { required_work_amount: 0.0 }
+        );
+    }
+
+    /// A work base whose type adds nothing of its own decodes to the base's keys and
+    /// nothing else, which is a payload rather than an unrecognized shape.
+    #[test]
+    fn a_work_with_no_type_specific_fields_carries_no_specific_data() {
+        let work = work_from(
+            r#"{"id":"e05d9dfb-f721-4a53-b438-edb25f8f5c95",
+                "workable_bounds":{"location":{"x":0.0,"y":0.0,"z":100.0},
+                    "rotation":{"x":0.0,"y":0.0,"z":0.0,"w":1.0},
+                    "box_sphere_bounds":{"origin":{"x":0.0,"y":0.0,"z":0.0},
+                        "box_extent":{"x":550.0,"y":550.0,"z":100.0},
+                        "sphere_radius":784.2193570679061}},
+                "base_camp_id_belong_to":"16a18bfe-f989-4d61-ae64-061de5eb1b09",
+                "owner_map_object_model_id":"597e59bd-c6e9-473f-afb8-99feae79811d",
+                "owner_map_object_concrete_model_id":"71e76921-f89f-4a57-b417-b3380106af68",
+                "current_state":1,"assign_locations":[],"behaviour_type":0,
+                "assign_define_data_id":"BootUp_0","override_work_type":0,
+                "assignable_fixed_type":0,
+                "assignable_otomo":false,"can_trigger_worker_event":false,
+                "can_steal_assign":true,
+                "transform":{"type":2,
+                    "map_object_instance_id":"597e59bd-c6e9-473f-afb8-99feae79811d",
+                    "trailing_bytes":[0,0,0,0,0,0,0,0]}}"#,
+        );
+        assert_eq!(work.work_specific_data, PalWorkTypeSpecificData::None);
+    }
+
+    /// A key no work shape accounts for must error naming it. `unknown_bytes` is the
+    /// dialect's own catch-all for a payload longer than its decoder expected; `PalWork`
+    /// has nowhere to keep it, so it cannot be waved through.
+    #[test]
+    fn an_unrecognized_work_field_errs() {
+        let value: serde_json::Value = serde_json::from_str(
+            r#"{"id":"b38e2281-f228-44bc-992f-d9268cd0799b",
+                "workable_bounds":{"location":{"x":0.0,"y":0.0,"z":250.0},
+                    "rotation":{"x":0.0,"y":-0.0,"z":0.0,"w":1.0},
+                    "box_sphere_bounds":{"origin":{"x":0.0,"y":0.0,"z":0.0},
+                        "box_extent":{"x":400.0,"y":400.0,"z":250.0},
+                        "sphere_radius":618.4658438426491}},
+                "base_camp_id_belong_to":"16a18bfe-f989-4d61-ae64-061de5eb1b09",
+                "owner_map_object_model_id":"f4cb4274-5066-4681-8a72-01c5ae137a45",
+                "owner_map_object_concrete_model_id":"8d46db52-67f6-4aba-9c0e-1df40a3a15d0",
+                "current_state":1,"assign_locations":[],"behaviour_type":0,
+                "assign_define_data_id":"OilPump_0","override_work_type":0,
+                "assignable_fixed_type":0,
+                "assignable_otomo":true,"can_trigger_worker_event":true,
+                "can_steal_assign":true,
+                "required_work_amount":0.0,"current_work_amount":2000.0,
+                "work_exp":0,"work_exp_calc_type":0,
+                "auto_work_self_amount_by_sec":0.0,
+                "progress_time_since_last_tick":0.0,"tick_process_min_interval":0.0,
+                "unknown_bytes":[1,2,3],
+                "transform":{"type":2,
+                    "map_object_instance_id":"f4cb4274-5066-4681-8a72-01c5ae137a45",
+                    "trailing_bytes":[0,0,0,0,0,0,0,0]}}"#,
+        )
+        .unwrap();
+        let error = Palworld::game_struct_from_gvas_json("worldSaveData.WorkSaveData.RawData", &value)
+            .expect_err("an unaccounted key must error");
+        let Error::GvasJson { path, message } = error else { panic!("expected a GvasJson error") };
+        assert_eq!(path, "worldSaveData.WorkSaveData.RawData");
+        assert!(message.contains("unknown_bytes"), "message was: {message}");
+    }
+
+    /// A `multi_tail` that is not exactly the run uesave reads after the progress
+    /// fields is reported rather than silently truncated.
+    #[test]
+    fn a_multi_tail_that_does_not_account_for_its_bytes_errs() {
+        let value: serde_json::Value = serde_json::from_str(
+            r#"{"id":"c4957227-428b-364b-0ffc-c4aaa60f091c",
+                "workable_bounds":{"location":{"x":0.0,"y":0.0,"z":50.0},
+                    "rotation":{"x":0.0,"y":-0.0,"z":0.0,"w":1.0},
+                    "box_sphere_bounds":{"origin":{"x":0.0,"y":0.0,"z":0.0},
+                        "box_extent":{"x":120.0,"y":180.0,"z":47.5},
+                        "sphere_radius":221.48645556782924}},
+                "base_camp_id_belong_to":"16a18bfe-f989-4d61-ae64-061de5eb1b09",
+                "owner_map_object_model_id":"306ae54d-329e-48a5-ba28-a8a50e202237",
+                "owner_map_object_concrete_model_id":"6c388cac-cb5a-40cb-b9a0-9928bf85c7c3",
+                "current_state":1,"assign_locations":[],"behaviour_type":0,
+                "assign_define_data_id":"AncientBlastFurnace_0","override_work_type":0,
+                "assignable_fixed_type":0,
+                "assignable_otomo":true,"can_trigger_worker_event":true,
+                "can_steal_assign":true,
+                "required_work_amount":0.0,"current_work_amount":0.0,
+                "work_exp":0,"work_exp_calc_type":0,
+                "auto_work_self_amount_by_sec":0.0,
+                "progress_time_since_last_tick":0.0,"tick_process_min_interval":0.0,
+                "multi_tail":[0,0,0,0,0,0,0,0,0,7,7,7]}"#,
+        )
+        .unwrap();
+        let error = Palworld::game_struct_from_gvas_json("worldSaveData.WorkSaveData.RawData", &value)
+            .expect_err("leftover tail bytes must error");
+        let Error::GvasJson { path, message } = error else { panic!("expected a GvasJson error") };
+        assert_eq!(path, "worldSaveData.WorkSaveData.RawData");
+        assert!(message.contains("multi_tail"), "message was: {message}");
+    }
+
+    const WORK_ASSIGN_PATH: &str = "worldSaveData.WorkSaveData.WorkAssignMap.RawData";
+
+    fn work_assign_from(json: &str) -> games::palworld::PalWorkAssign {
+        let adapted = game_struct(WORK_ASSIGN_PATH, json);
+        let PalStruct::WorkAssign(assign) = adapted else { panic!("expected WorkAssign") };
+        assign
+    }
+
+    /// The shape most `WorkAssignMap` entries in the corpus take: no `multi_type`
+    /// tail, and `fixed` arrives as a JSON bool the way `PalWork`'s own booleanized
+    /// fields do.
+    #[test]
+    fn adapts_a_work_assign_with_no_multi_type_tail() {
+        let assign = work_assign_from(
+            r#"{"id":"c161ee77-67e8-4d7a-b88c-2638451fc914",
+                "location_index":0,
+                "assign_type":1,
+                "assigned_individual_id":{
+                    "player_uid":"00000000-0000-0000-0000-000000000000",
+                    "instance_id":"2c3b55ae-8f45-4d7f-9f4d-f9f42fc179fe"},
+                "state":2,
+                "fixed":false,
+                "trailing_bytes":[0,0,0,0]}"#,
+        );
+        assert_eq!(assign.id, FGuid::parse_str("c161ee77-67e8-4d7a-b88c-2638451fc914").unwrap());
+        assert_eq!(assign.location_index, 0);
+        assert_eq!(assign.assign_type, 1);
+        assert_eq!(assign.assigned_individual_id.guid, FGuid::default());
+        assert_eq!(
+            assign.assigned_individual_id.instance_id,
+            FGuid::parse_str("2c3b55ae-8f45-4d7f-9f4d-f9f42fc179fe").unwrap()
+        );
+        assert_eq!(assign.state, 2);
+        assert_eq!(assign.fixed, 0, "the dialect writes a bool where uesave keeps a u32");
+        assert!(assign.multi_type.is_none());
+    }
+
+    /// Assignments to a `Progress_MultiType` work carry a `multi_type` tail; the
+    /// dialect keeps the bytes uesave would read for it raw in `unknown_bytes` instead.
+    #[test]
+    fn adapts_a_work_assign_with_a_multi_type_tail_from_unknown_bytes() {
+        let assign = work_assign_from(
+            r#"{"id":"c161ee77-67e8-4d7a-b88c-2638451fc914",
+                "location_index":0,
+                "assign_type":1,
+                "assigned_individual_id":{
+                    "player_uid":"00000000-0000-0000-0000-000000000000",
+                    "instance_id":"2c3b55ae-8f45-4d7f-9f4d-f9f42fc179fe"},
+                "state":2,
+                "fixed":false,
+                "trailing_bytes":[0,0,0,0],
+                "unknown_bytes":[1,14,35,0,0,0,0]}"#,
+        );
+        let multi_type = assign.multi_type.expect("multi_type decoded from unknown_bytes");
+        assert_eq!(multi_type.assigned_work_suitability, 1);
+        assert_eq!(multi_type.assigned_work_type, 14);
+        assert_eq!(multi_type.assigned_work_action_type, 35);
+        assert_eq!(multi_type.trailing_bytes, [0, 0, 0, 0]);
+    }
+
+    /// `unknown_bytes` with a byte left over after the tail is not the shape
+    /// `multi_type` decodes to, and is reported rather than truncated.
+    #[test]
+    fn a_work_assign_multi_type_tail_with_leftover_bytes_errs() {
+        let value: serde_json::Value = serde_json::from_str(
+            r#"{"id":"c161ee77-67e8-4d7a-b88c-2638451fc914",
+                "location_index":0,
+                "assign_type":1,
+                "assigned_individual_id":{
+                    "player_uid":"00000000-0000-0000-0000-000000000000",
+                    "instance_id":"2c3b55ae-8f45-4d7f-9f4d-f9f42fc179fe"},
+                "state":2,
+                "fixed":false,
+                "trailing_bytes":[0,0,0,0],
+                "unknown_bytes":[1,14,35,0,0,0,0,99]}"#,
+        )
+        .unwrap();
+        let error = Palworld::game_struct_from_gvas_json(WORK_ASSIGN_PATH, &value)
+            .expect_err("leftover unknown_bytes must error");
+        let Error::GvasJson { path, message } = error else { panic!("expected a GvasJson error") };
+        assert_eq!(path, WORK_ASSIGN_PATH);
+        assert!(message.contains("unknown_bytes"), "message was: {message}");
+    }
+
+    /// A key neither shape accounts for must error naming it.
+    #[test]
+    fn an_unrecognized_work_assign_field_errs() {
+        let value: serde_json::Value = serde_json::from_str(
+            r#"{"id":"c161ee77-67e8-4d7a-b88c-2638451fc914",
+                "location_index":0,
+                "assign_type":1,
+                "assigned_individual_id":{
+                    "player_uid":"00000000-0000-0000-0000-000000000000",
+                    "instance_id":"2c3b55ae-8f45-4d7f-9f4d-f9f42fc179fe"},
+                "state":2,
+                "fixed":false,
+                "trailing_bytes":[0,0,0,0],
+                "extra_field":5}"#,
+        )
+        .unwrap();
+        let error = Palworld::game_struct_from_gvas_json(WORK_ASSIGN_PATH, &value)
+            .expect_err("an unaccounted key must error");
+        let Error::GvasJson { path, message } = error else { panic!("expected a GvasJson error") };
+        assert_eq!(path, WORK_ASSIGN_PATH);
+        assert!(message.contains("extra_field"), "message was: {message}");
     }
 }

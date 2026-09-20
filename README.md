@@ -35,7 +35,9 @@ Options:
 ## Features
 
 - `gvas-json` — read the GVAS JSON dialect into uesave's property tree.
-  See `src/compat/gvas_json.rs`.
+  See `src/compat/gvas_json.rs`. Adapters for Palworld live in
+  `src/games/palworld/compat.rs`, which documents where that dialect diverges from
+  the binary wire format.
 
 ## Alternative projects
 in no particular order:

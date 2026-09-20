@@ -7,8 +7,11 @@
 //! serialized back to byte arrays on write.
 
 pub mod base_camp;
+pub mod base_camp_module;
 pub mod build_process;
 pub mod character;
+#[cfg(feature = "gvas-json")]
+pub mod compat;
 pub mod compression;
 pub mod connector;
 pub mod groups;
@@ -21,8 +24,11 @@ pub mod map_object;
 pub mod pal_struct;
 pub mod types;
 pub mod work;
+pub mod work_collection;
+pub mod worker_director;
 
 pub use base_camp::*;
+pub use base_camp_module::*;
 pub use build_process::*;
 pub use character::*;
 pub use compression::{CompressionFormat, MagicBytes};
@@ -36,14 +42,38 @@ pub use map_model::*;
 pub use pal_struct::PalStruct;
 pub use types::*;
 pub use work::*;
+pub use work_collection::PalWorkCollection;
+pub use worker_director::PalWorkerDirector;
 
 use crate::game::Game;
 use crate::{
-    ArchiveReader, ByteArray, Property, PropertyKey, PropertyTagDataPartial, PropertyTagPartial,
-    Result, Save, SaveGameArchive, SaveGameArchiveType, StructType, StructValue, Types, ValueVec,
+    ArchiveReader, ByteArray, Header, PackageVersion, Property, PropertyKey,
+    PropertyTagDataPartial, PropertyTagPartial, Result, Save, SaveGameArchive,
+    SaveGameArchiveType, StructType, StructValue, Types, ValueVec,
 };
 use pal_struct::{bare_name, PAL_STRUCT_TYPES};
 use std::io::{Cursor, Read, Seek, Write};
+
+/// Header used to drive a standalone [`SaveGameArchive`] over a payload lifted
+/// out of the property-tree type system. Only `engine_version_major` affects
+/// these codecs, since it is what `Vector` checks to choose between its f32 and
+/// f64 layouts; the rest of the header is unused filler.
+pub(crate) fn standalone_header(engine_version_major: u16) -> Header {
+    Header {
+        magic: u32::from_le_bytes(*b"GVAS"),
+        save_game_version: 2,
+        package_version: PackageVersion {
+            ue4: 522,
+            ue5: (engine_version_major >= 5).then_some(1008),
+        },
+        engine_version_major,
+        engine_version_minor: 0,
+        engine_version_patch: 0,
+        engine_version_build: 0,
+        engine_version: String::new(),
+        custom_version: None,
+    }
+}
 
 /// Path of the map object save data which needs context-dependent parsing of
 /// the embedded data of its elements.
@@ -99,6 +129,8 @@ impl Game for Palworld {
             "PalMapConcreteModelModule" => {
                 PalStruct::MapConcreteModelModule(PalMapConcreteModelModule::read(ar)?)
             }
+            "PalWorkerDirector" => PalStruct::WorkerDirector(PalWorkerDirector::read(ar)?.into()),
+            "PalWorkCollection" => PalStruct::WorkCollection(PalWorkCollection::read(ar)?),
             other => {
                 return Err(crate::Error::Other(format!(
                     "unknown Palworld struct type {other:?}"
@@ -162,6 +194,10 @@ impl Game for Palworld {
             "PalMapConcreteModelModule" => {
                 PalStruct::MapConcreteModelModule(PalMapConcreteModelModule::deserialize(d)?)
             }
+            "PalWorkerDirector" => {
+                PalStruct::WorkerDirector(PalWorkerDirector::deserialize(d)?.into())
+            }
+            "PalWorkCollection" => PalStruct::WorkCollection(PalWorkCollection::deserialize(d)?),
             other => {
                 return Err(serde::de::Error::custom(format!(
                     "unknown Palworld struct type {other:?}"
@@ -358,6 +394,19 @@ impl Game for Palworld {
     fn compress_save(data: &[u8]) -> Result<Vec<u8>> {
         compression::compress_save(data, CompressionFormat::Zlib)
     }
+
+    #[cfg(feature = "gvas-json")]
+    fn game_struct_from_gvas_json(
+        path: &str,
+        value: &serde_json::Value,
+    ) -> Result<Option<Self::Struct<SaveGameArchiveType<Self>>>> {
+        compat::game_struct_from_json(path, value)
+    }
+
+    #[cfg(feature = "gvas-json")]
+    fn game_bytes_from_gvas_json(path: &str, value: &serde_json::Value) -> Result<Option<Vec<u8>>> {
+        compat::game_bytes_from_json(path, value)
+    }
 }
 
 impl Save<Palworld> {
@@ -476,8 +525,6 @@ pub fn palworld_types() -> Types {
         "worldSaveData.EnemyCampSaveData.EnemyCampStatusMap.TreasureBoxInfoMapBySpawnerName.Value",
         "worldSaveData.FoliageGridSaveDataMap.ModelMap.RawData",
         "worldSaveData.FoliageGridSaveDataMap.ModelMap.InstanceDataMap.RawData",
-        "worldSaveData.BaseCampSaveData.WorkerDirector.RawData",
-        "worldSaveData.BaseCampSaveData.WorkCollection.RawData",
         MAP_OBJECT_SAVE_DATA_PATH,
         GROUP_SAVE_DATA_PATH,
         WORK_SAVE_DATA_PATH,
@@ -534,6 +581,14 @@ pub fn palworld_types() -> Types {
         (
             "worldSaveData.GuildExtraSaveDataMap.Lab.RawData",
             "PalGuildLab",
+        ),
+        (
+            "worldSaveData.BaseCampSaveData.WorkerDirector.RawData",
+            "PalWorkerDirector",
+        ),
+        (
+            "worldSaveData.BaseCampSaveData.WorkCollection.RawData",
+            "PalWorkCollection",
         ),
     ];
     for (path, name) in pal_hints {
